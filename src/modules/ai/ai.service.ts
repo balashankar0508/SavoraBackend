@@ -1,6 +1,7 @@
 import { pool } from '../../db/pool';
 import { env } from '../../config/env';
 import { HttpError } from '../../lib/httpError';
+import { logger } from '../../lib/logger';
 import { AI_DAILY_LIMIT, SubscriptionTier } from '../../types/shared';
 
 const RECEIPT_PROMPT = `You are extracting structured data from an Indian UPI payment receipt screenshot (Google Pay, PhonePe, Paytm, BHIM, etc).
@@ -69,7 +70,13 @@ export async function parseReceipt(
     },
   );
 
-  if (!geminiRes.ok) throw new HttpError(502, 'ai_request_failed');
+  if (!geminiRes.ok) {
+    logger.error(
+      { status: geminiRes.status, body: await geminiRes.text().catch(() => '<unreadable>') },
+      'Gemini receipt-parse request failed',
+    );
+    throw new HttpError(502, 'ai_request_failed');
+  }
 
   const geminiJson = (await geminiRes.json()) as {
     candidates?: { content?: { parts?: { text?: string }[] } }[];
