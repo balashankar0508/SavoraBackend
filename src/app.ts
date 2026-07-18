@@ -13,6 +13,10 @@ import aiRoutes from './modules/ai/ai.routes';
 export function createApp() {
   const app = express();
 
+  // Behind Nginx on the same box — trust the first hop so req.ip (and
+  // express-rate-limit's IP-based keying) reads X-Forwarded-For correctly.
+  app.set('trust proxy', 1);
+
   app.use(helmet());
   app.use(cors({ origin: env.CORS_ORIGIN }));
   app.use(express.json({ limit: '10mb' })); // receipt images are base64-inlined in the JSON body
