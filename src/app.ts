@@ -1,7 +1,9 @@
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
+import { pinoHttp } from 'pino-http';
 import { env } from './config/env';
+import { logger } from './lib/logger';
 import { generalLimiter } from './middleware/rateLimit';
 import { errorHandler } from './middleware/errorHandler';
 import { notFound } from './middleware/notFound';
@@ -16,6 +18,19 @@ export function createApp() {
   // Behind Nginx on the same box — trust the first hop so req.ip (and
   // express-rate-limit's IP-based keying) reads X-Forwarded-For correctly.
   app.set('trust proxy', 1);
+
+  // One structured JSON line per request (method, path, status, duration,
+  // IP) to stdout — PM2 captures that into out-*.log, so success traffic
+  // is finally visible there instead of only errors landing in the logs.
+  // Auth/refresh headers and password/token/OTP fields are redacted (see
+  // logger.ts); /health is skipped to avoid drowning real traffic in
+  // keepalive-check noise.
+  app.use(
+    pinoHttp({
+      logger,
+      autoLogging: { ignore: (req) => req.url === '/health' },
+    }),
+  );
 
   app.use(helmet());
   app.use(cors({ origin: env.CORS_ORIGIN }));
