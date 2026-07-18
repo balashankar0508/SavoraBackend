@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'spenxo-api',
       script: 'dist/index.js',
-      instances: 2,
+      instances: 1,
       exec_mode: 'cluster',
       env: {
         NODE_ENV: 'production',
