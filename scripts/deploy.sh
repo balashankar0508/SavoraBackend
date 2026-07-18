@@ -19,7 +19,7 @@ echo "==> Pruning devDependencies"
 npm prune --omit=dev
 
 echo "==> Starting/reloading PM2"
-if pm2 describe savora-api > /dev/null 2>&1; then
+if pm2 describe spenxo-api > /dev/null 2>&1; then
   pm2 reload ecosystem.config.js --update-env
 else
   pm2 start ecosystem.config.js

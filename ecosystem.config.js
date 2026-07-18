@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'savora-api',
+      name: 'spenxo-api',
       script: 'dist/index.js',
       instances: 2,
       exec_mode: 'cluster',

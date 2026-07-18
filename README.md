@@ -1,6 +1,6 @@
-# Savora Backend
+# Spenxo Backend
 
-Self-hosted Node.js/TypeScript API for Savora, replacing Supabase (Postgres + Auth + Edge Functions). Raw `pg` (no ORM), JWT + bcrypt auth, deployed bare-metal on a VPS via PM2 + Nginx + Postgres, no Docker.
+Self-hosted Node.js/TypeScript API for Spenxo, replacing Supabase (Postgres + Auth + Edge Functions). Raw `pg` (no ORM), JWT + bcrypt auth, deployed bare-metal on a VPS via PM2 + Nginx + Postgres, no Docker.
 
 ## Local development
 

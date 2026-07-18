@@ -1,8 +1,8 @@
 {
-  "name": "savora-backend",
+  "name": "spenxo-backend",
   "version": "0.1.0",
   "private": true,
-  "description": "Self-hosted Node.js API backend for Savora, replacing Supabase (auth + Postgres + edge functions).",
+  "description": "Self-hosted Node.js API backend for Spenxo, replacing Supabase (auth + Postgres + edge functions).",
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
