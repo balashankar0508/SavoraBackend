@@ -52,7 +52,11 @@ export async function parseReceipt(
   if (!allowed) throw new HttpError(403, 'quota_exceeded');
 
   const geminiRes = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${env.GEMINI_API_KEY}`,
+    // gemini-2.0-flash was deprecated Feb 2026 and shut down Jun 1 2026 --
+    // that's what was actually behind the "quota limit: 0" 429s, not a
+    // billing requirement. gemini-3.5-flash is the current free-tier model
+    // (10 RPM / 1,500 req/day, no billing) as of Jul 2026.
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${env.GEMINI_API_KEY}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
