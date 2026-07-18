@@ -6,14 +6,17 @@ cd "$(dirname "$0")/.."
 echo "==> Pulling latest code"
 git pull origin main
 
-echo "==> Installing production dependencies"
-npm ci --omit=dev
+echo "==> Installing dependencies (incl. devDependencies, needed for build/migrate)"
+npm ci
 
 echo "==> Building"
 npm run build
 
 echo "==> Running migrations"
 npm run migrate
+
+echo "==> Pruning devDependencies"
+npm prune --omit=dev
 
 echo "==> Starting/reloading PM2"
 if pm2 describe savora-api > /dev/null 2>&1; then

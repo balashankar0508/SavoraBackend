@@ -62,9 +62,10 @@ sudo certbot --nginx -d api.yourdomain.com
 # 7. PM2
 sudo npm install -g pm2
 cd ~/SavoraBackend
-npm ci --omit=dev
+npm ci               # full install — tsc/ts-node (devDependencies) are needed for build/migrate
 npm run build
 npm run migrate
+npm prune --omit=dev # now safe to drop devDependencies
 pm2 start ecosystem.config.js
 pm2 startup systemd   # run the command it prints
 pm2 save
@@ -100,11 +101,7 @@ git push vps-remote main   # or scp the repo / dist over
 
 # on the VPS
 cd ~/SavoraBackend
-git pull
-npm ci --omit=dev
-npm run build
-npm run migrate           # safe to run every deploy — no-ops if nothing new
-pm2 reload ecosystem.config.js   # zero-downtime reload across cluster instances
+./scripts/deploy.sh   # git pull, npm ci, build, migrate, prune devDeps, pm2 reload
 ```
 
 ### Scaling out later
