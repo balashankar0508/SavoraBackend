@@ -120,7 +120,32 @@ Postgres itself stays a single primary for now; read replicas/sharding are futur
 | `JWT_ACCESS_SECRET` | Signs 15-minute access tokens |
 | `JWT_REFRESH_PEPPER` | Peppers refresh-token/OTP/reset-token hashes before storage |
 | `GEMINI_API_KEY` | Server-side only — used by `/ai/parse-receipt` |
-| `RESEND_API_KEY`, `MAIL_FROM` | Transactional email for OTP + password reset links |
+| `BREVO_API_KEY`, `MAIL_FROM` | Transactional email (Brevo) for OTP + password reset links |
 | `CORS_ORIGIN` | Mobile app has no browser origin; `*` is fine, tighten if a web client is ever added |
 
 `.env` must never be committed — it's already in `.gitignore`.
+
+## Database backups
+
+`scripts/backup-db.sh` dumps Postgres, uploads it to Google Drive, and keeps the last 7 days both locally (`/root/db-backups`) and on Drive. Run daily via cron.
+
+One-time setup on Google Cloud (console.cloud.google.com):
+1. **APIs & Services → Library** → enable the **Google Drive API** for your project.
+2. **APIs & Services → Credentials → Create Credentials → Service Account** — name it e.g. `spenxo-backup`, skip optional role grants (access comes from folder sharing, not IAM).
+3. Open the new service account → **Keys → Add Key → Create new key → JSON** — downloads a key file. Copy it to the server, e.g. `/root/.config/spenxo-gdrive-sa.json`, and `chmod 600` it.
+4. In regular Google Drive, create a folder (e.g. "Spenxo DB Backups"), right-click → **Share**, and add the service account's email (`...@<project-id>.iam.gserviceaccount.com`) as **Editor**. Copy the folder's ID from its URL (`.../folders/<FOLDER_ID>`).
+
+One-time setup on the server:
+```bash
+curl https://rclone.org/install.sh | sudo bash
+
+rclone config create gdrive drive \
+  scope=drive \
+  service_account_file=/root/.config/spenxo-gdrive-sa.json \
+  root_folder_id=<FOLDER_ID>
+
+chmod +x scripts/backup-db.sh
+crontab -e
+# add this line (daily at 2am server time):
+# 0 2 * * * /root/SavoraBackend/scripts/backup-db.sh >> /root/db-backups/backup.log 2>&1
+```
