@@ -8,6 +8,9 @@ const envSchema = z.object({
   JWT_ACCESS_SECRET: z.string().min(32, 'JWT_ACCESS_SECRET must be at least 32 chars'),
   JWT_REFRESH_PEPPER: z.string().min(32, 'JWT_REFRESH_PEPPER must be at least 32 chars'),
   GEMINI_API_KEY: z.string().min(1, 'GEMINI_API_KEY is required'),
+  // Optional -- fallback for AI receipt parsing when Gemini is overloaded.
+  // Leave unset to skip the fallback entirely (Gemini failures surface as-is).
+  ANTHROPIC_API_KEY: z.string().optional(),
   MAIL_PROVIDER: z.enum(['brevo']).default('brevo'),
   BREVO_API_KEY: z.string().min(1, 'BREVO_API_KEY is required'),
   MAIL_FROM: z.string().min(1, 'MAIL_FROM is required'),

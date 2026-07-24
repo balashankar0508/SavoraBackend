@@ -119,7 +119,8 @@ Postgres itself stays a single primary for now; read replicas/sharding are futur
 | `DATABASE_URL` | Postgres connection string |
 | `JWT_ACCESS_SECRET` | Signs 15-minute access tokens |
 | `JWT_REFRESH_PEPPER` | Peppers refresh-token/OTP/reset-token hashes before storage |
-| `GEMINI_API_KEY` | Server-side only — used by `/ai/parse-receipt` |
+| `GEMINI_API_KEY` | Server-side only — primary model for `/ai/parse-receipt` |
+| `ANTHROPIC_API_KEY` | Optional — Claude Haiku 4.5 fallback for `/ai/parse-receipt` when Gemini is overloaded (503). Leave unset to skip the fallback. |
 | `BREVO_API_KEY`, `MAIL_FROM` | Transactional email (Brevo) for OTP + password reset links |
 | `CORS_ORIGIN` | Mobile app has no browser origin; `*` is fine, tighten if a web client is ever added |
 
