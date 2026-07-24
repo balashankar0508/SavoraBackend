@@ -41,6 +41,31 @@ async function tryConsumeAiQuota(userId: string, dailyLimit: number): Promise<bo
   return rows[0]?.try_consume_ai_quota ?? false;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
+
+/** Gemini occasionally 503s with "high demand, try again later" -- that's
+ * transient overload on Google's side, not a real failure, so it's worth
+ * one quick retry before giving up (the daily quota was already consumed
+ * once, up front, so retrying here doesn't double-charge it). */
+async function callGeminiWithRetry(body: unknown): Promise<Response> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const res = await fetch(GEMINI_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.status !== 503 || attempt === 2) return res;
+    logger.warn({ attempt }, 'Gemini 503 (high demand) -- retrying once');
+    await sleep(1500);
+  }
+  /* istanbul ignore next -- unreachable, loop always returns */
+  throw new Error('unreachable');
+}
+
 export async function parseReceipt(
   userId: string,
   image: string,
@@ -52,28 +77,17 @@ export async function parseReceipt(
   const allowed = await tryConsumeAiQuota(userId, limit);
   if (!allowed) throw new HttpError(403, 'quota_exceeded');
 
-  const geminiRes = await fetch(
-    // gemini-2.0-flash was deprecated Feb 2026 and shut down Jun 1 2026 --
-    // that's what was actually behind the "quota limit: 0" 429s, not a
-    // billing requirement. gemini-3.5-flash is the current free-tier model
-    // (10 RPM / 1,500 req/day, no billing) as of Jul 2026.
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${env.GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              { text: RECEIPT_PROMPT },
-              { inline_data: { mime_type: mimeType, data: image } },
-            ],
-          },
+  const geminiRes = await callGeminiWithRetry({
+    contents: [
+      {
+        parts: [
+          { text: RECEIPT_PROMPT },
+          { inline_data: { mime_type: mimeType, data: image } },
         ],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0 },
-      }),
-    },
-  );
+      },
+    ],
+    generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+  });
 
   if (!geminiRes.ok) {
     logger.error(
