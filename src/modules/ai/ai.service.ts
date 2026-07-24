@@ -11,7 +11,7 @@ Return ONLY a single JSON object — no markdown, no commentary — with this sh
   "amount": number,
   "merchantName": string,
   "date": "YYYY-MM-DD",
-  "time": string,
+  "time": "h:mm AM/PM",
   "upiId": string,
   "utr": string,
   "transactionId": string,
@@ -21,8 +21,9 @@ Return ONLY a single JSON object — no markdown, no commentary — with this sh
 
 Rules:
 - "type" is "income" when the screenshot shows money received ("Received from", credited), "expense" when paid/sent/debited.
-- "amount" is the actual transaction amount only — never a phone number, account suffix, or reference number digit string.
-- Convert any date shown into YYYY-MM-DD.`;
+- "amount" is a plain JSON number — no currency symbol, no thousands separators (e.g. 1234.56, not "₹1,234.56").
+- Convert any date shown into YYYY-MM-DD.
+- Convert any time shown into 12-hour "h:mm AM/PM" (e.g. "10:25 AM", "9:05 PM") — never 24-hour, never with seconds.`;
 
 async function fetchTier(userId: string): Promise<SubscriptionTier> {
   const { rows } = await pool.query<{ tier: SubscriptionTier }>(
