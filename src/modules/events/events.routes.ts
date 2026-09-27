@@ -69,11 +69,27 @@ async function detail(c: PoolClient, id: string) {
       [id]
     )
   ).rows;
+  const categories = (
+    await c.query(
+      "select * from event_budget_categories where event_id=$1 order by name",
+      [id]
+    )
+  ).rows;
+  const activity = (
+    await c.query(
+      `select a.*, u.name as actor_name from event_activity a
+       left join users u on u.id=a.actor_id where a.event_id=$1
+       order by a.created_at desc limit 50`,
+      [id]
+    )
+  ).rows;
   return {
     event,
     members,
     expenses,
     settlements,
+    categories,
+    activity,
     balances: balances(
       members.map((m) => m.id),
       expenses,
@@ -108,6 +124,15 @@ router.post(
         title: z.string().trim().min(1).max(100),
         event_date: date,
         budget_paise: money,
+        event_type: z.string().trim().min(1).max(40).default("custom"),
+        location: z.string().trim().max(120).optional(),
+        cover_emoji: z.string().min(1).max(16).default("🎉"),
+        categories: z.array(z.object({
+          name: z.string().trim().min(1).max(40),
+          budget_paise: z.number().int().min(0).max(1000000000),
+          icon: z.string().min(1).max(16),
+          color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+        })).max(20).default([]),
       })
       .parse(req.body);
     const event = await transaction(async (c) => {
@@ -125,18 +150,30 @@ router.post(
           previous.owner_id === req.userId &&
           previous.title === d.title &&
           previous.event_date === d.event_date &&
-          previous.budget_paise === d.budget_paise
+          previous.budget_paise === d.budget_paise &&
+          previous.event_type === d.event_type &&
+          (previous.location ?? "") === (d.location ?? "")
         )
           return previous;
         throw new HttpError(409, "duplicate_id");
       }
       const { rows } = await c.query(
-        "insert into events(id,owner_id,title,event_date,budget_paise) values($1,$2,$3,$4,$5) returning *",
-        [d.id, req.userId, d.title, d.event_date, d.budget_paise]
+        "insert into events(id,owner_id,title,event_date,budget_paise,event_type,location,cover_emoji) values($1,$2,$3,$4,$5,$6,$7,$8) returning *",
+        [d.id, req.userId, d.title, d.event_date, d.budget_paise, d.event_type, d.location ?? null, d.cover_emoji]
       );
       await c.query(
         "insert into event_members(event_id,user_id) values($1,$2)",
         [rows[0].id, req.userId]
+      );
+      for (const category of d.categories) {
+        await c.query(
+          "insert into event_budget_categories(event_id,name,budget_paise,icon,color) values($1,$2,$3,$4,$5)",
+          [rows[0].id, category.name, category.budget_paise, category.icon, category.color]
+        );
+      }
+      await c.query(
+        "insert into event_activity(event_id,actor_id,kind,summary) values($1,$2,'event_created',$3)",
+        [rows[0].id, req.userId, `Created ${d.title}`]
       );
       return rows[0];
     });
@@ -183,10 +220,15 @@ router.post(
         !members.some((m) => m.user_id === req.userId)
       )
         throw new HttpError(409, "event_member_limit");
-      await c.query(
+      const joined = await c.query(
         "insert into event_members(event_id,user_id) values($1,$2) on conflict do nothing",
         [e.id, req.userId]
       );
+      if (joined.rowCount)
+        await c.query(
+          "insert into event_activity(event_id,actor_id,kind,summary) values($1,$2,'member_joined','Joined the event')",
+          [e.id, req.userId]
+        );
       return e;
     });
     res.json({ event });
@@ -240,6 +282,12 @@ router.post(
           )
           .min(1)
           .max(100),
+        notes: z.string().trim().max(1000).optional(),
+        expense_time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+        payment_method: z.enum(["upi", "cash", "card", "bank", "other"]).default("other"),
+        receipt_name: z.string().trim().max(160).optional(),
+        receipt_mime: z.string().trim().max(80).optional(),
+        receipt_data: z.string().max(7500000).optional(),
       })
       .parse(req.body);
     await transaction(async (c) => {
@@ -283,7 +331,7 @@ router.post(
         throw new HttpError(409, "duplicate_id");
       }
       await c.query(
-        "insert into event_expenses(id,event_id,created_by,paid_by,title,category,amount_paise,expense_date,splits) values($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        "insert into event_expenses(id,event_id,created_by,paid_by,title,category,amount_paise,expense_date,splits,notes,expense_time,payment_method,receipt_name,receipt_mime,receipt_data) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
         [
           d.id,
           req.params.id,
@@ -294,7 +342,17 @@ router.post(
           d.amount_paise,
           d.expense_date,
           JSON.stringify(splits),
+          d.notes ?? null,
+          d.expense_time ?? null,
+          d.payment_method,
+          d.receipt_name ?? null,
+          d.receipt_mime ?? null,
+          d.receipt_data ?? null,
         ]
+      );
+      await c.query(
+        "insert into event_activity(event_id,actor_id,kind,summary,amount_paise) values($1,$2,'expense_added',$3,$4)",
+        [req.params.id, req.userId, `Added ${d.title}`, d.amount_paise]
       );
     });
     res.status(201).json({ ok: true });
@@ -328,7 +386,7 @@ router.post(
   "/:id/settlements",
   route(async (req, res) => {
     const d = z
-      .object({ id: uuid, to_user: uuid, amount_paise: money })
+      .object({ id: uuid, to_user: uuid, amount_paise: money, payment_method: z.enum(["upi", "cash", "bank", "other"]).default("other") })
       .parse(req.body);
     await transaction(async (c) => {
       await access(c, req.params.id, req.userId, true);
@@ -362,9 +420,10 @@ router.post(
       )
         throw new HttpError(409, "pending_settlement_exists");
       await c.query(
-        "insert into event_settlements(id,event_id,from_user,to_user,amount_paise) values($1,$2,$3,$4,$5)",
-        [d.id, req.params.id, req.userId, d.to_user, d.amount_paise]
+        "insert into event_settlements(id,event_id,from_user,to_user,amount_paise,payment_method) values($1,$2,$3,$4,$5,$6)",
+        [d.id, req.params.id, req.userId, d.to_user, d.amount_paise, d.payment_method]
       );
+      await c.query("insert into event_activity(event_id,actor_id,kind,summary,amount_paise) values($1,$2,'settlement_recorded','Recorded a settlement',$3)", [req.params.id, req.userId, d.amount_paise]);
     });
     res.status(201).json({ ok: true });
   })
@@ -386,9 +445,10 @@ router.post(
       const b = (await detail(c, req.params.id)).balances;
       if (s.amount_paise > Math.min(-b[s.from_user], b[s.to_user]))
         throw new HttpError(409, "balance_changed");
-      await c.query("update event_settlements set confirmed=true where id=$1", [
+      await c.query("update event_settlements set confirmed=true,confirmed_at=now() where id=$1", [
         s.id,
       ]);
+      await c.query("insert into event_activity(event_id,actor_id,kind,summary,amount_paise) values($1,$2,'settlement_confirmed','Confirmed a settlement',$3)", [req.params.id, req.userId, s.amount_paise]);
     });
     res.json({ ok: true });
   })
