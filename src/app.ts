@@ -11,6 +11,7 @@ import authRoutes from './modules/auth/auth.routes';
 import transactionsRoutes from './modules/transactions/transactions.routes';
 import goalsRoutes from './modules/goals/goals.routes';
 import aiRoutes from './modules/ai/ai.routes';
+import eventsRoutes from './modules/events/events.routes';
 
 export function createApp() {
   const app = express();
@@ -43,6 +44,7 @@ export function createApp() {
   app.use('/transactions', transactionsRoutes);
   app.use('/goals', goalsRoutes);
   app.use('/ai', aiRoutes);
+  app.use('/events', eventsRoutes);
 
   app.use(notFound);
   app.use(errorHandler);
