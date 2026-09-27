@@ -2,7 +2,7 @@ import { HttpError } from "../../lib/httpError";
 export type Split = { user_id: string; value: number };
 export function splitExpense(
   amount: number,
-  mode: "equal" | "percentage" | "custom",
+  mode: "equal" | "percentage" | "custom" | "exact" | "shares",
   input: Split[]
 ) {
   if (
@@ -10,7 +10,7 @@ export function splitExpense(
     new Set(input.map((s) => s.user_id)).size !== input.length
   )
     throw new HttpError(400, "invalid_split_members");
-  if (mode === "custom") {
+  if (mode === "custom" || mode === "exact") {
     if (
       input.some((s) => !Number.isSafeInteger(s.value) || s.value < 0) ||
       input.reduce((n, s) => n + s.value, 0) !== amount
@@ -20,6 +20,8 @@ export function splitExpense(
   }
   const weights = input.map((s) => (mode === "equal" ? 1 : s.value));
   const total = weights.reduce((a, b) => a + b, 0);
+  if (mode === "shares" && (total <= 0 || weights.some((v) => !Number.isInteger(v) || v <= 0)))
+    throw new HttpError(400, "shares_must_be_positive_integers");
   if (
     mode === "percentage" &&
     (total !== 10000 || weights.some((v) => !Number.isInteger(v) || v < 0))

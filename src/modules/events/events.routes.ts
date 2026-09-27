@@ -6,6 +6,7 @@ import { pool } from "../../db/pool";
 import { requireAuth } from "../../middleware/requireAuth";
 import { HttpError } from "../../lib/httpError";
 import { splitExpense, balances } from "./events.math";
+import { eventMutationLimiter, invitationLimiter } from "../../middleware/rateLimit";
 const router = Router();
 router.use(requireAuth);
 const uuid = z.string().uuid();
@@ -39,7 +40,7 @@ async function transaction<T>(fn: (c: PoolClient) => Promise<T>) {
 }
 async function access(c: PoolClient, id: string, user: string, active = false) {
   const { rows } = await c.query(
-    "select e.* from events e join event_members m on m.event_id=e.id where e.id=$1 and m.user_id=$2 for update of e",
+    "select e.*,m.role as member_role from events e join event_members m on m.event_id=e.id where e.id=$1 and m.user_id=$2 and m.status='active' for update of e",
     [uuid.parse(id), user]
   );
   if (!rows[0]) throw new HttpError(404, "event_not_found");
@@ -53,13 +54,13 @@ async function detail(c: PoolClient, id: string) {
   ).rows[0];
   const members = (
     await c.query(
-      "select u.id, u.name from event_members m join users u on u.id=m.user_id where m.event_id=$1 order by m.joined_at,u.id",
+      "select u.id, u.name, m.role, m.payment_upi_id from event_members m join users u on u.id=m.user_id where m.event_id=$1 and m.status='active' order by m.joined_at,u.id",
       [id]
     )
   ).rows;
   const expenses = (
     await c.query(
-      "select *, expense_date::text from event_expenses where event_id=$1 order by created_at desc",
+      "select *, expense_date::text from event_expenses where event_id=$1 and status='active' order by created_at desc",
       [id]
     )
   ).rows;
@@ -68,7 +69,10 @@ async function detail(c: PoolClient, id: string) {
       "select * from event_settlements where event_id=$1 order by created_at desc",
       [id]
     )
-  ).rows;
+  ).rows.map(({ proof_data, ...settlement }) => ({
+    ...settlement,
+    has_proof: Boolean(proof_data),
+  }));
   const categories = (
     await c.query(
       "select * from event_budget_categories where event_id=$1 order by name",
@@ -105,12 +109,13 @@ router.get(
 router.get(
   "/",
   route(async (req, res) => {
+    const limit = z.coerce.number().int().min(1).max(100).default(50).parse(req.query.limit);
     const { rows } = await pool.query(
       `select e.*, e.event_date::text,
- coalesce((select sum(amount_paise)::float8 from event_expenses where event_id=e.id),0) as spent_paise,
- (select count(*)::int from event_members where event_id=e.id) as member_count
- from events e join event_members m on m.event_id=e.id where m.user_id=$1 order by e.created_at desc`,
-      [req.userId]
+ coalesce((select sum(amount_paise)::float8 from event_expenses where event_id=e.id and status='active'),0) as spent_paise,
+ (select count(*)::int from event_members where event_id=e.id and status='active') as member_count
+ from events e join event_members m on m.event_id=e.id where m.user_id=$1 and m.status='active' and e.status<>'archived' order by e.created_at desc limit $2`,
+      [req.userId,limit]
     );
     res.json({ events: rows });
   })
@@ -123,17 +128,22 @@ router.post(
         id: uuid,
         title: z.string().trim().min(1).max(100),
         event_date: date,
+        end_date: date.optional(),
         budget_paise: money,
+        currency: z.string().regex(/^[A-Z]{3}$/).default("INR"),
+        description: z.string().trim().max(1000).optional(),
+        join_policy: z.enum(["admin_only","code_join","code_request_approval"]).default("code_join"),
         event_type: z.string().trim().min(1).max(40).default("custom"),
         location: z.string().trim().max(120).optional(),
         cover_emoji: z.string().min(1).max(16).default("🎉"),
+        settlement_requires_approval: z.boolean().default(true),
         categories: z.array(z.object({
           name: z.string().trim().min(1).max(40),
           budget_paise: z.number().int().min(0).max(1000000000),
           icon: z.string().min(1).max(16),
           color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
         })).max(20).default([]),
-      })
+      }).refine(value => !value.end_date || value.end_date >= value.event_date, { message: "end_date_before_start_date", path: ["end_date"] })
       .parse(req.body);
     const event = await transaction(async (c) => {
       // Serializes retries before the event row exists.
@@ -152,17 +162,22 @@ router.post(
           previous.event_date === d.event_date &&
           previous.budget_paise === d.budget_paise &&
           previous.event_type === d.event_type &&
-          (previous.location ?? "") === (d.location ?? "")
+          (previous.location ?? "") === (d.location ?? "") &&
+          (previous.end_date?.toISOString?.().slice(0,10) ?? previous.end_date ?? null) === (d.end_date ?? null) &&
+          previous.currency === d.currency &&
+          (previous.description ?? "") === (d.description ?? "") &&
+          previous.join_policy === d.join_policy &&
+          previous.settlement_requires_approval === d.settlement_requires_approval
         )
           return previous;
         throw new HttpError(409, "duplicate_id");
       }
       const { rows } = await c.query(
-        "insert into events(id,owner_id,title,event_date,budget_paise,event_type,location,cover_emoji) values($1,$2,$3,$4,$5,$6,$7,$8) returning *",
-        [d.id, req.userId, d.title, d.event_date, d.budget_paise, d.event_type, d.location ?? null, d.cover_emoji]
+        "insert into events(id,owner_id,title,event_date,end_date,budget_paise,currency,description,join_policy,event_type,location,cover_emoji,settlement_requires_approval) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning *",
+        [d.id,req.userId,d.title,d.event_date,d.end_date ?? null,d.budget_paise,d.currency,d.description ?? null,d.join_policy,d.event_type,d.location ?? null,d.cover_emoji,d.settlement_requires_approval]
       );
       await c.query(
-        "insert into event_members(event_id,user_id) values($1,$2)",
+        "insert into event_members(event_id,user_id,role) values($1,$2,'owner')",
         [rows[0].id, req.userId]
       );
       for (const category of d.categories) {
@@ -175,6 +190,7 @@ router.post(
         "insert into event_activity(event_id,actor_id,kind,summary) values($1,$2,'event_created',$3)",
         [rows[0].id, req.userId, `Created ${d.title}`]
       );
+      await c.query("insert into event_audit_logs(event_id,actor_id,action) values($1,$2,'EVENT_CREATED')", [rows[0].id,req.userId]);
       return rows[0];
     });
     res.status(201).json({ event });
@@ -182,6 +198,7 @@ router.post(
 );
 router.post(
   "/join",
+  invitationLimiter,
   route(async (req, res) => {
     const { token } = z
       .object({ token: z.string().regex(/^[a-f0-9]{64}$/) })
@@ -200,6 +217,7 @@ router.post(
         ])
       ).rows[0];
       if (e.status !== "active") throw new HttpError(409, "event_completed");
+      if (e.join_policy === "admin_only") throw new HttpError(403, "admin_invitation_required");
       // Recheck after locking: an owner may have replaced the invitation.
       if (
         !(
@@ -220,17 +238,21 @@ router.post(
         !members.some((m) => m.user_id === req.userId)
       )
         throw new HttpError(409, "event_member_limit");
+      const requested = e.join_policy === "code_request_approval";
       const joined = await c.query(
-        "insert into event_members(event_id,user_id) values($1,$2) on conflict do nothing",
-        [e.id, req.userId]
+        `insert into event_members(event_id,user_id,status,invited_by) values($1,$2,$3,$4)
+         on conflict(event_id,user_id) do update set status=case when event_members.status in ('removed','left') then excluded.status else event_members.status end,removed_at=null,updated_at=now()
+         returning status,(xmax=0) as inserted`,
+        [e.id,req.userId,requested ? 'invited' : 'active',e.owner_id]
       );
-      if (joined.rowCount)
+      if (joined.rows[0]?.status === 'active' && joined.rows[0]?.inserted)
         await c.query(
           "insert into event_activity(event_id,actor_id,kind,summary) values($1,$2,'member_joined','Joined the event')",
           [e.id, req.userId]
         );
-      return e;
+      return { ...e, join_pending: requested };
     });
+    if (event.join_pending) return res.status(202).json({ join_pending: true, event_id: event.id });
     res.json({ event });
   })
 );
@@ -247,6 +269,7 @@ router.get(
 );
 router.post(
   "/:id/invites",
+  invitationLimiter,
   route(async (req, res) => {
     const token = randomBytes(32).toString("hex");
     await transaction(async (c) => {
@@ -263,6 +286,7 @@ router.post(
 );
 router.post(
   "/:id/expenses",
+  eventMutationLimiter,
   route(async (req, res) => {
     const d = z
       .object({
@@ -272,7 +296,7 @@ router.post(
         amount_paise: money,
         expense_date: date,
         paid_by: uuid,
-        mode: z.enum(["equal", "percentage", "custom"]),
+        mode: z.enum(["equal", "percentage", "custom", "exact", "shares"]),
         splits: z
           .array(
             z.object({
@@ -327,7 +351,7 @@ router.post(
             )
           ) === JSON.stringify(splits.map((s) => [s.user_id, s.amount_paise]))
         )
-          return;
+          return previous;
         throw new HttpError(409, "duplicate_id");
       }
       await c.query(
@@ -354,6 +378,7 @@ router.post(
         "insert into event_activity(event_id,actor_id,kind,summary,amount_paise) values($1,$2,'expense_added',$3,$4)",
         [req.params.id, req.userId, `Added ${d.title}`, d.amount_paise]
       );
+      await c.query("insert into event_audit_logs(event_id,actor_id,action,target_type,target_id) values($1,$2,'EXPENSE_CREATED','expense',$3)", [req.params.id,req.userId,d.id]);
     });
     res.status(201).json({ ok: true });
   })
@@ -377,18 +402,22 @@ router.delete(
         [e.id]
       );
       if (settled.rowCount) throw new HttpError(409, "settlements_exist");
-      await c.query("delete from event_expenses where id=$1", [x.id]);
+      if (x.status === "voided") return;
+      await c.query("update event_expenses set status='voided',voided_at=now(),voided_by=$2,updated_at=now() where id=$1", [x.id,req.userId]);
+      await c.query("insert into event_activity(event_id,actor_id,kind,summary,amount_paise) values($1,$2,'expense_voided',$3,$4)", [e.id,req.userId,`Voided ${x.title}`,x.amount_paise]);
+      await c.query("insert into event_audit_logs(event_id,actor_id,action,target_type,target_id) values($1,$2,'EXPENSE_VOIDED','expense',$3)", [e.id,req.userId,x.id]);
     });
     res.json({ ok: true });
   })
 );
 router.post(
   "/:id/settlements",
+  eventMutationLimiter,
   route(async (req, res) => {
     const d = z
       .object({ id: uuid, to_user: uuid, amount_paise: money, payment_method: z.enum(["upi", "cash", "bank", "other"]).default("other") })
       .parse(req.body);
-    await transaction(async (c) => {
+    const settlement = await transaction(async (c) => {
       await access(c, req.params.id, req.userId, true);
       const previous = (
         await c.query("select * from event_settlements where id=$1", [d.id])
@@ -400,7 +429,7 @@ router.post(
           previous.to_user === d.to_user &&
           previous.amount_paise === d.amount_paise
         )
-          return;
+          return previous;
         throw new HttpError(409, "duplicate_id");
       }
       const state = await detail(c, req.params.id);
@@ -414,18 +443,20 @@ router.post(
       if (
         state.settlements.some(
           (s) =>
-            !s.confirmed &&
+            !s.confirmed && s.status !== "cancelled" &&
             (s.from_user === req.userId || s.to_user === d.to_user)
         )
       )
         throw new HttpError(409, "pending_settlement_exists");
-      await c.query(
-        "insert into event_settlements(id,event_id,from_user,to_user,amount_paise,payment_method) values($1,$2,$3,$4,$5,$6)",
+      const inserted = await c.query(
+        "insert into event_settlements(id,event_id,from_user,to_user,amount_paise,payment_method,status) values($1,$2,$3,$4,$5,$6,'pending_payment') returning *",
         [d.id, req.params.id, req.userId, d.to_user, d.amount_paise, d.payment_method]
       );
-      await c.query("insert into event_activity(event_id,actor_id,kind,summary,amount_paise) values($1,$2,'settlement_recorded','Recorded a settlement',$3)", [req.params.id, req.userId, d.amount_paise]);
+      await c.query("insert into event_activity(event_id,actor_id,kind,summary,amount_paise) values($1,$2,'settlement_recorded','Started a settlement',$3)", [req.params.id, req.userId, d.amount_paise]);
+      await c.query("insert into event_audit_logs(event_id,actor_id,action,target_type,target_id) values($1,$2,'SETTLEMENT_CREATED','settlement',$3)", [req.params.id,req.userId,d.id]);
+      return inserted.rows[0];
     });
-    res.status(201).json({ ok: true });
+    res.status(201).json({ settlement });
   })
 );
 router.post(
@@ -439,16 +470,21 @@ router.post(
           [uuid.parse(req.params.settlementId), req.params.id]
         )
       ).rows[0];
-      if (!s || s.to_user !== req.userId)
+      const event = await c.query("select owner_id from events where id=$1", [req.params.id]);
+      if (!s || (s.to_user !== req.userId && event.rows[0]?.owner_id !== req.userId))
         throw new HttpError(403, "recipient_required");
       if (s.confirmed) return;
+      if (s.status !== "pending_approval" || !s.proof_data)
+        throw new HttpError(409, "payment_proof_required");
       const b = (await detail(c, req.params.id)).balances;
       if (s.amount_paise > Math.min(-b[s.from_user], b[s.to_user]))
         throw new HttpError(409, "balance_changed");
-      await c.query("update event_settlements set confirmed=true,confirmed_at=now() where id=$1", [
+      await c.query("update event_settlements set confirmed=true,status='completed',confirmed_at=now(),reviewed_by=$2,reviewed_at=now() where id=$1", [
         s.id,
+        req.userId,
       ]);
       await c.query("insert into event_activity(event_id,actor_id,kind,summary,amount_paise) values($1,$2,'settlement_confirmed','Confirmed a settlement',$3)", [req.params.id, req.userId, s.amount_paise]);
+      await c.query("insert into event_audit_logs(event_id,actor_id,action,target_type,target_id) values($1,$2,'SETTLEMENT_COMPLETED','settlement',$3)", [req.params.id,req.userId,s.id]);
     });
     res.json({ ok: true });
   })
@@ -459,10 +495,11 @@ router.delete(
     await transaction(async (c) => {
       await access(c, req.params.id, req.userId, true);
       const r = await c.query(
-        "delete from event_settlements where id=$1 and event_id=$2 and confirmed=false and (from_user=$3 or to_user=$3)",
+        "update event_settlements set status='cancelled',reviewed_by=$3,reviewed_at=now() where id=$1 and event_id=$2 and confirmed=false and status<>'cancelled' and (from_user=$3 or to_user=$3) returning id",
         [uuid.parse(req.params.settlementId), req.params.id, req.userId]
       );
       if (!r.rowCount) throw new HttpError(404, "pending_settlement_not_found");
+      await c.query("insert into event_audit_logs(event_id,actor_id,action,target_type,target_id) values($1,$2,'SETTLEMENT_CANCELLED','settlement',$3)", [req.params.id,req.userId,req.params.settlementId]);
     });
     res.json({ ok: true });
   })
@@ -484,6 +521,8 @@ router.patch(
       )
         throw new HttpError(409, "settle_balances_first");
       await c.query("update events set status=$1 where id=$2", [status, e.id]);
+      await c.query("insert into event_audit_logs(event_id,actor_id,action) values($1,$2,$3)", [e.id,req.userId,status === 'completed' ? 'EVENT_COMPLETED' : 'EVENT_REOPENED']);
+      await c.query("insert into event_activity(event_id,actor_id,kind,summary) values($1,$2,$3,$4)", [e.id,req.userId,status === 'completed' ? 'event_completed' : 'event_reopened',status === 'completed' ? 'Completed the event' : 'Reopened the event']);
     });
     res.json({ ok: true });
   })

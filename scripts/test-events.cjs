@@ -24,6 +24,7 @@ const { signAccessToken } = require("../dist/lib/jwt");
 const express = require("express");
 const { ZodError } = require("zod");
 const router = require("../dist/modules/events/events.routes").default;
+const experienceRouter = require("../dist/modules/events/events.experience.routes").default;
 let server, base, owner, member, outsider, eventId;
 const tokens = {};
 async function request(user, method, url, body) {
@@ -75,6 +76,7 @@ before(async () => {
   const app = express();
   app.use(express.json());
   app.use("/events", router);
+  app.use("/events", experienceRouter);
   app.use((e, r, s, n) =>
     s
       .status(e.status || (e instanceof ZodError ? 400 : 500))
@@ -124,6 +126,14 @@ test("rounding preserves every paise and is deterministic", () => {
   );
   assert.throws(() =>
     splitExpense(100, "percentage", [{ user_id: "a", value: 9999 }])
+  );
+  assert.deepEqual(
+    splitExpense(100, "shares", [
+      { user_id: "a", value: 1 },
+      { user_id: "b", value: 2 },
+      { user_id: "c", value: 3 },
+    ]).map((s) => s.amount_paise),
+    [17, 33, 50]
   );
 });
 test("pending settlements do not change balances", () => {
@@ -336,6 +346,15 @@ test("event lifecycle enforces membership, invitations, financial integrity and 
     ).status,
     403
   );
+  assert.equal((await request(owner, "POST", `/events/${eventId}/settlements/${settlement.id}/confirm`)).status, 409);
+  const proof = {
+    proof_name: "payment.png",
+    proof_mime: "image/png",
+    proof_data: Buffer.from("test payment proof image content").toString("base64"),
+  };
+  assert.equal((await request(outsider, "POST", `/events/${eventId}/settlements/${settlement.id}/proof`, proof)).status, 404);
+  assert.equal((await request(member, "POST", `/events/${eventId}/settlements/${settlement.id}/proof`, proof)).body.settlement.status, "pending_approval");
+  assert.equal((await request(owner, "GET", `/events/${eventId}/settlements/${settlement.id}/proof`)).body.data, proof.proof_data);
   assert.equal(
     (
       await request(
@@ -392,4 +411,21 @@ test("event lifecycle enforces membership, invitations, financial integrity and 
     ).status,
     200
   );
+  assert.equal((await request(owner, "POST", `/events/${eventId}/members/${member}/promote`)).status, 200);
+  assert.equal((await request(owner, "POST", `/events/${eventId}/members/${member}/demote`)).status, 200);
+  assert.equal((await request(owner, "POST", `/events/${eventId}/transfer-ownership`, { new_owner_id: member })).status, 200);
+  assert.equal((await request(owner, "PATCH", `/events/${eventId}/status`, { status: "completed" })).status, 403);
+  assert.equal((await request(member, "PATCH", `/events/${eventId}/status`, { status: "completed" })).status, 200);
+  assert.equal((await request(owner, "POST", `/events/${eventId}/archive`)).status, 403);
+  assert.equal((await request(member, "GET", `/events/${eventId}/audit-log`)).status, 200);
+  assert.equal((await request(member, "POST", `/events/${eventId}/archive`)).status, 200);
+  assert.equal((await request(member, "GET", "/events")).body.events.some((event) => event.id === eventId), false);
+
+  const voidEvent = { id: randomUUID(), title: "Void test", event_date: "2026-11-01", budget_paise: 1000 };
+  assert.equal((await request(owner, "POST", "/events", voidEvent)).status, 201);
+  const voidExpense = { id: randomUUID(), title: "Correction", category: "Other", amount_paise: 500, expense_date: "2026-11-01", paid_by: owner, mode: "equal", splits: [{ user_id: owner, value: 0 }] };
+  assert.equal((await request(owner, "POST", `/events/${voidEvent.id}/expenses`, voidExpense)).status, 201);
+  assert.equal((await request(owner, "DELETE", `/events/${voidEvent.id}/expenses/${voidExpense.id}`)).status, 200);
+  assert.equal((await request(owner, "GET", `/events/${voidEvent.id}`)).body.expenses.length, 0);
+  assert.equal((await pool.query("select status from event_expenses where id=$1", [voidExpense.id])).rows[0].status, "voided");
 });
