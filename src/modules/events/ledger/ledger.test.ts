@@ -5,7 +5,7 @@ import path from 'node:path';
 import {
   splitExpense, SplitMode, SplitInput,
   computeBalances, maxSettlement, assertSettlementAllowed, isFullySettled,
-  suggestTransfers, assertLedgerConsistent, computeEventStats, windowRange, computePairwise,
+  suggestTransfers, assertLedgerConsistent, computeEventStats, windowRange, previousWindowRange, computePairwise,
   parseRupees, formatINR, assertPaise, LedgerError,
   LedgerExpense, LedgerSettlement,
 } from './index';
@@ -380,4 +380,25 @@ test('computePairwise property: owed - you_owe always equals the net balance', (
       assert.equal(p.owed_paise - p.you_owe_paise, after[u], `user ${u}`);
     }
   }
+});
+
+test('previous window and change vs last week / last month', () => {
+  assert.equal(previousWindowRange('all', '2026-09-27'), null);
+  assert.deepEqual(previousWindowRange('week', '2026-09-27'), { from: '2026-09-14', to: '2026-09-20' });
+  assert.deepEqual(previousWindowRange('month', '2026-03-10'), { from: '2026-02-01', to: '2026-02-28' });
+  assert.deepEqual(previousWindowRange('month', '2026-01-15'), { from: '2025-12-01', to: '2025-12-31' });
+
+  const members = ['a', 'b'];
+  const expenses = [
+    sx('a', 10000, 'Food', '2026-09-15', members), // last week
+    sx('b', 11200, 'Food', '2026-09-22', members), // this week
+  ];
+  const week = computeEventStats({ budget_paise: null, memberIds: members, expenses, window: 'week', today: '2026-09-24' });
+  assert.equal(week.previous_spent_paise, 10000);
+  assert.equal(week.change_pct, 12, '+12% from last week, as in the design');
+  const drop = computeEventStats({ budget_paise: null, memberIds: members, expenses: [expenses[0], sx('b', 2500, 'Food', '2026-09-22', members)], window: 'week', today: '2026-09-24' });
+  assert.equal(drop.change_pct, -75);
+  const none = computeEventStats({ budget_paise: null, memberIds: members, expenses: [expenses[1]], window: 'week', today: '2026-09-24' });
+  assert.equal(none.change_pct, null, 'nothing last week to compare with');
+  assert.equal(computeEventStats({ budget_paise: null, memberIds: members, expenses, window: 'all', today: '2026-09-24' }).change_pct, null);
 });

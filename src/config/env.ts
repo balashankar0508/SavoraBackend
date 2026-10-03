@@ -27,6 +27,8 @@ const envSchema = z.object({
   CHAT_ENCRYPTION_KEY: hex32('CHAT_ENCRYPTION_KEY'),
   // Keys the HMAC lookup hash and AES-GCM display copy of event invite codes.
   INVITE_CODE_KEY: hex32('INVITE_CODE_KEY'),
+  // Optional: Firebase service-account JSON for push notifications. Unset = pushes are skipped.
+  FIREBASE_SERVICE_ACCOUNT_PATH: z.string().optional().transform(v => (v ? v : undefined)),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -20,9 +20,19 @@ openssl rand -hex 32   # JWT_REFRESH_PEPPER
 ## Tests
 
 ```bash
-npm test               # unit tests: ledger (money/split/balances/stats), authorization policy, file storage
+npm test                 # unit tests: ledger, authorization policy, file storage, crypto, chat encryption, PDFs, CSV, notification messages
 npm run typecheck:tests
+npm run test:integration # builds, then runs the Events API tests (needs a throwaway Postgres, see below)
 ```
+
+The integration tests run the real app over HTTP and **only** touch a disposable database. They need an
+isolated PostgreSQL on `127.0.0.1:55439` with user `events_test` (trust auth); they drop and recreate
+`spenxo_events_test` on every run, and never read `DATABASE_URL`:
+```bash
+initdb -D /tmp/spenxo-pg -U events_test --auth=trust
+pg_ctl -D /tmp/spenxo-pg -o "-p 55439" start
+```
+To look at the generated PDFs while developing: `SPENXO_PDF_OUT=/tmp/pdfs npm test` writes sample files.
 
 ## Smoke testing
 
@@ -134,11 +144,32 @@ Postgres itself stays a single primary for now; read replicas/sharding are futur
 | `CHAT_ENCRYPTION_KEY` | 64 hex chars (`openssl rand -hex 32`). AES-256-GCM key for chat messages at rest. **Required** - the server will not start without it. Losing it makes old chat unreadable, so back it up separately from the database. |
 | `INVITE_CODE_KEY` | 64 hex chars (`openssl rand -hex 32`). Keys the lookup hash and encrypted copy of event invite codes. **Required.** Do not reuse the JWT secrets. |
 
+| `FIREBASE_SERVICE_ACCOUNT_PATH` | Optional. Path to a Firebase service-account JSON (kept outside the repo, `chmod 600`) that enables push notifications. Unset = the API works as normal and pushes are skipped. |
+
 `.env` must never be committed — it's already in `.gitignore`.
+
+## Events
+
+The Events module (shared expenses, balances, settlements, chat, reports, push) is documented in
+[EVENTS.md](EVENTS.md): permissions, money rules, security model, the full API list, notification rules and rollout notes.
+
+### Push notifications (Firebase Cloud Messaging)
+
+1. In the [Firebase console](https://console.firebase.google.com) create a project and add an **Android app** with package name `com.savora.app`. Download `google-services.json` for the mobile app (`Savora/android/app/`).
+2. **Project settings → Service accounts → Generate new private key.** Copy that JSON to the server, e.g. `/root/.config/spenxo-firebase.json`, `chmod 600` it, and set `FIREBASE_SERVICE_ACCOUNT_PATH` to its path.
+3. `./scripts/deploy.sh` (or `pm2 reload ecosystem.config.js --update-env`). The startup log shows a warning when pushes are disabled.
+
+Pushes never contain chat text or payment details. Devices that Google reports as uninstalled are removed from `device_tokens` automatically.
 
 ## Database backups
 
-`scripts/backup-db.sh` dumps Postgres, uploads it to Google Drive, and keeps the last 7 days both locally (`/root/db-backups`) and on Drive. Run daily via cron.
+`scripts/backup-db.sh` dumps Postgres **and archives the uploads folder** (`UPLOAD_DIR`: receipts, payment screenshots, chat images), uploads both to Google Drive, and keeps the last 7 days locally (`/root/db-backups`) and on Drive. Run daily via cron.
+
+Two things to know:
+- **Keep `CHAT_ENCRYPTION_KEY` and `INVITE_CODE_KEY` somewhere else** (a password manager). The script deliberately does not back up `.env`: a database backup stored next to its own keys would defeat the encryption, and without the chat key the old chat messages cannot be read.
+- The uploads archive contains private payment screenshots. Share the Drive folder with the service account only, or use an rclone `crypt` remote.
+
+To restore: `gunzip -c savora-DATE.sql.gz | sudo -u postgres psql savora` and `tar -xzf uploads-DATE.tar.gz -C $(dirname $UPLOAD_DIR)`, then restore the two keys into `.env`.
 
 One-time setup on Google Cloud (console.cloud.google.com):
 1. **APIs & Services → Library** → enable the **Google Drive API** for your project.

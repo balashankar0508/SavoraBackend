@@ -17,6 +17,10 @@ export interface EventStats {
   /** Spend inside the window. */
   spent_paise: number;
   expense_count: number;
+  /** Spend in the equally long window just before this one (null for 'all'). */
+  previous_spent_paise: number | null;
+  /** Change vs the previous window, whole percent; null when there is nothing to compare. */
+  change_pct: number | null;
   /** All-time spend: budget figures always use this, whatever the window. */
   total_spent_paise: number;
   budget_paise: number | null;
@@ -54,6 +58,15 @@ export function windowRange(window: StatsWindow, today: string): { from: string 
   return { from: fmtDay(start), to: fmtDay(end) };
 }
 
+/** The window immediately before `window`: last week, or last calendar month. */
+export function previousWindowRange(window: StatsWindow, today: string): { from: string; to: string } | null {
+  if (window === 'all') return null;
+  const current = windowRange(window, today);
+  const from = parseDay(current.from!);
+  if (window === 'week') return { from: fmtDay(from - 7 * DAY_MS), to: fmtDay(from - DAY_MS) };
+  return windowRange('month', fmtDay(from - DAY_MS)) as { from: string; to: string };
+}
+
 export function computeEventStats(input: {
   budget_paise: number | null;
   memberIds: string[];
@@ -66,6 +79,11 @@ export function computeEventStats(input: {
   const inWindow = active.filter(
     e => (!range.from || e.expense_date >= range.from) && (!range.to || e.expense_date <= range.to),
   );
+
+  const previousRange = previousWindowRange(input.window, input.today);
+  const previousSpent = previousRange
+    ? active.filter(e => e.expense_date >= previousRange.from && e.expense_date <= previousRange.to).reduce((n, e) => n + e.amount_paise, 0)
+    : null;
 
   const total = active.reduce((n, e) => n + e.amount_paise, 0);
   const spent = inWindow.reduce((n, e) => n + e.amount_paise, 0);
@@ -122,6 +140,8 @@ export function computeEventStats(input: {
     range,
     spent_paise: spent,
     expense_count: inWindow.length,
+    previous_spent_paise: previousSpent,
+    change_pct: previousSpent ? Math.round(((spent - previousSpent) * 100) / previousSpent) : null,
     total_spent_paise: total,
     budget_paise: budget,
     remaining_paise: budget === null ? null : budget - total,

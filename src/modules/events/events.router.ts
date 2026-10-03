@@ -2,9 +2,12 @@ import { Router } from 'express';
 import { requireAuth } from '../../middleware/requireAuth';
 import { eventContext } from './access';
 import { collectionRoutes, eventRoutes } from './events/events.routes';
+import chatRoutes from './chat/chat.routes';
 import expenseRoutes from './expenses/expenses.routes';
 import invitationRoutes, { joinRoutes } from './invitations/invitations.routes';
 import membershipRoutes from './membership/membership.routes';
+import reportRoutes from './reports/reports.routes';
+import { prefsRoutes } from '../notifications/notifications.routes';
 import settlementRoutes from './settlements/settlements.routes';
 
 /**
@@ -25,6 +28,9 @@ scoped.use(membershipRoutes);
 scoped.use(invitationRoutes);
 scoped.use(expenseRoutes);
 scoped.use(settlementRoutes);
+scoped.use(chatRoutes);
+scoped.use(reportRoutes);
+scoped.use(prefsRoutes);
 router.use('/:eventId', eventContext(), scoped);
 
 export default router;

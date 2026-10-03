@@ -34,6 +34,21 @@ const { pool } = require('../dist/db/pool');
 const { signAccessToken } = require('../dist/lib/jwt');
 const { createApp } = require('../dist/app');
 const { splitExpense } = require('../dist/modules/events/ledger');
+const { startNotifications, stopNotifications, flushNotifications } = require('../dist/modules/notifications');
+
+// A stand-in for Firebase: records every push, can mark tokens dead, can fail once.
+const push = {
+  sent: [],
+  dead: new Set(),
+  failNext: false,
+  sender: {
+    async send(tokens, payload) {
+      if (push.failNext) { push.failNext = false; throw new Error('FCM is down'); }
+      push.sent.push({ tokens: [...tokens], payload });
+      return { invalidTokens: tokens.filter(t => push.dead.has(t)) };
+    },
+  },
+};
 
 let server;
 let base;
@@ -48,12 +63,14 @@ before(async () => {
   for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.sql')).sort()) {
     await pool.query(fs.readFileSync(path.join(dir, file), 'utf8'));
   }
+  startNotifications({ sender: push.sender });
   server = createApp().listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 });
 
 after(async () => {
+  stopNotifications();
   await new Promise(resolve => server.close(resolve));
   await pool.end();
   fs.rmSync(uploadDir, { recursive: true, force: true });
@@ -969,4 +986,520 @@ test('the audit log and activity feed record who did what', async () => {
   assert.ok(actions.filter(r => r.action.startsWith('EXPENSE')).every(r => r.actor_id === a.id));
   const feed = (await pool.query('select kind from event_activity where event_id = $1', [eventId])).rows.map(r => r.kind);
   assert.ok(feed.includes('expense_added') && feed.includes('expense_voided') && feed.includes('member_joined'));
+});
+
+// ════════════════════════════════════════════════════════════════
+// T3: chat, reports, notifications
+// ════════════════════════════════════════════════════════════════
+
+const sendMsg = (user, eventId, text, id = randomUUID()) => api(user, 'POST', `/events/${eventId}/messages`, { id, kind: 'text', text });
+const messages = async (user, eventId, qs = '') => {
+  const r = await api(user, 'GET', `/events/${eventId}/messages${qs}`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return r.body;
+};
+
+// ── chat ────────────────────────────────────────────────────────
+
+test('chat: text is encrypted at rest and comes back readable, with system cards interleaved', async () => {
+  const { owner, eventId, members: [a] } = await setup({ members: 1 });
+  const secret = 'Are we ordering the cake today? ₹2,000 🎂';
+  const sent = await sendMsg(owner, eventId, secret);
+  assert.equal(sent.status, 201);
+  assert.equal(sent.body.message.text, secret);
+  assert.equal(sent.body.message.sender.id, owner.id);
+
+  const row = (await pool.query('select ciphertext, iv, key_version, kind from event_messages where id = $1', [sent.body.message.id])).rows[0];
+  assert.equal(row.kind, 'text');
+  assert.equal(row.key_version, 1);
+  assert.equal(row.iv.length, 12);
+  assert.ok(!row.ciphertext.includes(Buffer.from('cake')), 'stored encrypted');
+  const dump = (await pool.query('select * from event_messages where id = $1', [sent.body.message.id])).rows[0];
+  assert.ok(!JSON.stringify(dump).includes('cake'), 'no plaintext anywhere in the row');
+
+  await addExpense(a, eventId, a, 20000, [owner, a], { title: 'Cake' });
+  const list = await messages(a, eventId);
+  const kinds = list.messages.map(m => m.kind);
+  assert.ok(kinds.includes('text') && kinds.includes('system'));
+  assert.equal(list.messages.find(m => m.kind === 'text').text, secret);
+  const card = list.messages.find(m => m.kind === 'system' && m.payload.type === 'expense_added');
+  assert.equal(card.payload.title, 'Cake');
+  assert.equal(card.payload.amount_paise, 20000);
+  assert.equal(card.payload.actor_name, a.name);
+  assert.deepEqual([...list.messages].sort((x, y) => x.created_at < y.created_at ? -1 : 1).map(m => m.id), list.messages.map(m => m.id), 'oldest first');
+  assert.ok(list.server_time);
+});
+
+test('chat: retried sends are idempotent; the same id with other content or from someone else is 409', async () => {
+  const { owner, eventId, members: [a] } = await setup({ members: 1 });
+  const id = randomUUID();
+  assert.equal((await sendMsg(owner, eventId, 'hello', id)).status, 201);
+  const retry = await sendMsg(owner, eventId, 'hello', id);
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.message.text, 'hello');
+  assert.equal((await pool.query('select count(*)::int c from event_messages where id = $1', [id])).rows[0].c, 1);
+  assert.equal((await sendMsg(owner, eventId, 'different', id)).body.error, 'duplicate_id');
+  assert.equal((await sendMsg(a, eventId, 'hello', id)).body.error, 'duplicate_id');
+  const other = await setup({ members: 0 });
+  assert.equal((await sendMsg(other.owner, other.eventId, 'hello', id)).body.error, 'duplicate_id', 'not across events either');
+  // concurrent identical sends: exactly one row
+  const cid = randomUUID();
+  const both = await Promise.all([sendMsg(a, eventId, 'twice', cid), sendMsg(a, eventId, 'twice', cid)]);
+  assert.deepEqual(both.map(r => r.status).sort(), [200, 201]);
+  assert.equal((await pool.query('select count(*)::int c from event_messages where id = $1', [cid])).rows[0].c, 1);
+});
+
+test('chat: validation, attachments, and who may read or write', async () => {
+  const { owner, eventId, members: [a] } = await setup({ members: 1 });
+  const outsider = await newUser('outsider');
+  const post = (user, body) => api(user, 'POST', `/events/${eventId}/messages`, body);
+
+  assert.equal((await sendMsg(owner, eventId, '   ')).status, 400);
+  assert.equal((await sendMsg(owner, eventId, 'x'.repeat(2001))).status, 400);
+  assert.equal((await sendMsg(owner, eventId, 'x'.repeat(2000))).status, 201);
+  assert.equal((await post(owner, { id: randomUUID(), kind: 'text', text: 'hi', extra: 1 })).status, 400);
+  assert.equal((await post(owner, { id: randomUUID(), kind: 'voice', text: 'hi' })).status, 400);
+  assert.equal((await post(owner, { id: 'nope', kind: 'text', text: 'hi' })).status, 400);
+
+  const img = await upload(a, eventId, 'chat');
+  const receipt = await upload(a, eventId, 'receipt');
+  const ok = await post(a, { id: randomUUID(), kind: 'attachment', file_id: img.id, caption: 'the venue' });
+  assert.equal(ok.status, 201, JSON.stringify(ok.body));
+  assert.equal(ok.body.message.caption, 'the venue');
+  assert.equal(ok.body.message.attachment.file_id, img.id);
+  assert.equal(ok.body.message.attachment.mime, 'image/png');
+  assert.equal((await post(owner, { id: randomUUID(), kind: 'attachment', file_id: img.id })).body.error, 'invalid_file', "someone else's upload");
+  assert.equal((await post(a, { id: randomUUID(), kind: 'attachment', file_id: receipt.id })).body.error, 'invalid_file', 'wrong purpose');
+  assert.equal((await api(owner, 'GET', `/files/${img.id}`)).status, 200, 'members can open chat images');
+
+  assert.equal((await api(outsider, 'GET', `/events/${eventId}/messages`)).status, 404);
+  assert.equal((await sendMsg(outsider, eventId, 'let me in')).status, 404);
+
+  await api(owner, 'POST', `/events/${eventId}/complete`);
+  assert.equal((await api(a, 'GET', `/events/${eventId}/messages`)).status, 200, 'a finished event stays readable');
+  const late = await sendMsg(a, eventId, 'too late');
+  assert.equal(late.status, 409);
+  assert.equal(late.body.error, 'event_not_active');
+});
+
+test('chat: newest page first, paging back, and polling with since', async () => {
+  const { owner, eventId, members: [a] } = await setup({ members: 1 });
+  const texts = ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'];
+  for (const t of texts) await sendMsg(owner, eventId, t);
+  const texted = body => body.messages.filter(m => m.kind === 'text').map(m => m.text);
+
+  const p1 = await messages(a, eventId, '?limit=3');
+  assert.deepEqual(texted(p1), ['m5', 'm6', 'm7']);
+  assert.ok(p1.next_before);
+  const p2 = await messages(a, eventId, `?limit=3&before=${p1.next_before}`);
+  assert.deepEqual(texted(p2), ['m2', 'm3', 'm4']);
+  const p3 = await messages(a, eventId, `?limit=3&before=${p2.next_before}`);
+  assert.ok(p3.messages.some(m => m.text === 'm1'));
+  assert.equal(p3.next_before, null);
+  assert.equal((await api(a, 'GET', `/events/${eventId}/messages?before=junk`)).body.error, 'invalid_cursor');
+  assert.equal((await api(a, 'GET', `/events/${eventId}/messages?limit=0`)).status, 400);
+  assert.equal((await api(a, 'GET', `/events/${eventId}/messages?since=yesterday`)).status, 400);
+
+  // polling: only what is new since the last server_time (plus a short overlap the client de-duplicates)
+  const first = await messages(a, eventId);
+  await new Promise(r => setTimeout(r, 20));
+  const fresh = (await sendMsg(owner, eventId, 'brand new')).body.message;
+  const poll = await messages(a, eventId, `?since=${encodeURIComponent(first.server_time)}`);
+  assert.ok(poll.messages.some(m => m.id === fresh.id), 'the new message arrives');
+  assert.ok(poll.server_time >= first.server_time);
+  // long after: nothing new
+  assert.equal((await messages(a, eventId, `?since=${encodeURIComponent(new Date(Date.now() + 60_000).toISOString())}`)).messages.length, 0);
+});
+
+test('chat: deleting erases the content for everyone and shows up in polling', async () => {
+  const { owner, eventId, admins: [admin], members: [a, b] } = await setup({ admins: 1, members: 2 });
+  const mine = (await sendMsg(a, eventId, 'oops wrong chat')).body.message;
+  const theirs = (await sendMsg(b, eventId, 'rude message')).body.message;
+  const img = await upload(a, eventId, 'chat');
+  const withFile = (await api(a, 'POST', `/events/${eventId}/messages`, { id: randomUUID(), kind: 'attachment', file_id: img.id })).body.message;
+  const checkpoint = (await messages(owner, eventId)).server_time;
+
+  assert.equal((await api(a, 'DELETE', `/events/${eventId}/messages/${theirs.id}`)).status, 403, "a member cannot delete someone else's message");
+  assert.equal((await api(a, 'DELETE', `/events/${eventId}/messages/${mine.id}`)).status, 200, 'but can delete their own');
+  assert.equal((await api(admin, 'DELETE', `/events/${eventId}/messages/${theirs.id}`)).status, 200, 'an admin can moderate');
+  assert.equal((await api(a, 'DELETE', `/events/${eventId}/messages/${mine.id}`)).status, 404, 'already gone');
+  assert.equal((await api(a, 'DELETE', `/events/${eventId}/messages/${randomUUID()}`)).status, 404);
+
+  const row = (await pool.query('select ciphertext, iv, deleted_by from event_messages where id = $1', [mine.id])).rows[0];
+  assert.equal(row.ciphertext.length, 0, 'ciphertext is wiped, not just flagged');
+  assert.equal(row.deleted_by, a.id);
+  const list = (await messages(b, eventId)).messages;
+  const gone = list.find(m => m.id === theirs.id);
+  assert.equal(gone.deleted, true);
+  assert.ok(!('text' in gone), 'a deleted message carries no content at all');
+  assert.ok(!JSON.stringify(list).includes('rude message') && !JSON.stringify(list).includes('oops wrong chat'));
+  const polled = (await messages(b, eventId, `?since=${encodeURIComponent(checkpoint)}`)).messages;
+  assert.ok(polled.some(m => m.id === mine.id && m.deleted), 'the deletion reaches pollers');
+
+  const key = (await pool.query('select storage_key from files where id = $1', [img.id])).rows[0].storage_key;
+  assert.ok(fs.existsSync(path.join(uploadDir, key)));
+  assert.equal((await api(admin, 'DELETE', `/events/${eventId}/messages/${withFile.id}`)).status, 200);
+  assert.ok(!fs.existsSync(path.join(uploadDir, key)), 'deleting an image message deletes the file');
+  assert.equal((await api(owner, 'GET', `/files/${img.id}`)).status, 404);
+
+  const card = (await messages(owner, eventId)).messages.find(m => m.kind === 'system');
+  assert.equal((await api(a, 'DELETE', `/events/${eventId}/messages/${card.id}`)).status, 403, 'members cannot remove system cards');
+  assert.equal((await api(owner, 'DELETE', `/events/${eventId}/messages/${card.id}`)).status, 200, 'staff can');
+  const audit = (await pool.query("select metadata from event_audit_logs where event_id = $1 and action = 'CHAT_MESSAGE_REMOVED' order by created_at", [eventId])).rows;
+  assert.equal(audit[0].metadata.own_message, true);
+  assert.equal(audit[1].metadata.own_message, false);
+});
+
+test('chat: a tampered or transplanted ciphertext shows as unreadable without breaking the conversation', async () => {
+  const { owner, eventId } = await setup({ members: 0 });
+  const a = (await sendMsg(owner, eventId, 'first')).body.message;
+  const b = (await sendMsg(owner, eventId, 'second')).body.message;
+  const c = (await sendMsg(owner, eventId, 'third')).body.message;
+
+  await pool.query("update event_messages set ciphertext = ciphertext || '\\x00'::bytea where id = $1", [a.id]); // altered
+  await pool.query('update event_messages t set ciphertext = s.ciphertext, iv = s.iv from event_messages s where s.id = $1 and t.id = $2', [c.id, b.id]); // swapped in from another message
+
+  const list = (await messages(owner, eventId)).messages.filter(m => m.kind === 'text');
+  assert.equal(list.find(m => m.id === a.id).unreadable, true);
+  assert.equal(list.find(m => m.id === b.id).unreadable, true, 'the message id is bound into the encryption');
+  assert.equal(list.find(m => m.id === c.id).text, 'third', 'untouched messages still work');
+  assert.ok(!('text' in list.find(m => m.id === a.id)));
+});
+
+test('chat is rate limited per user (60 messages a minute)', async () => {
+  const { eventId, owner } = await setup({ members: 0 });
+  const statuses = [];
+  for (let i = 0; i < 62; i++) statuses.push((await sendMsg(owner, eventId, `spam ${i}`)).status);
+  assert.equal(statuses.filter(s => s === 201).length, 60);
+  assert.deepEqual(statuses.slice(60), [429, 429]);
+});
+
+// ── analytics, summary, downloads ───────────────────────────────
+
+async function reportEvent() {
+  const ctx = await setup({ members: 1 });
+  const { owner, eventId, members: [a] } = ctx;
+  const both = [owner, a];
+  await addExpense(owner, eventId, owner, 10000, both, { title: 'Last week lunch', category: 'Food', expense_date: '2026-09-15' });
+  await addExpense(a, eventId, a, 11200, both, { title: 'Dinner', category: 'Food', expense_date: '2026-09-22' });
+  await addExpense(owner, eventId, owner, 5000, both, { title: 'Taxi', category: 'Travel', expense_date: '2026-09-23' });
+  await addExpense(a, eventId, a, 7000, both, { title: 'Hotel', category: 'Stay', expense_date: '2026-08-30' });
+  return ctx;
+}
+
+test('analytics: totals, categories, contributions, trend and change vs the previous period', async () => {
+  const { owner, eventId, members: [a] } = await reportEvent();
+  const get = (qs, user = owner) => api(user, 'GET', `/events/${eventId}/analytics${qs}`);
+
+  const all = (await get('?window=all&today=2026-09-24')).body;
+  assert.equal(all.spent_paise, 33200);
+  assert.equal(all.total_spent_paise, 33200);
+  assert.equal(all.budget_paise, 800000);
+  assert.equal(all.remaining_paise, 766800);
+  assert.equal(all.budget_used_pct, 4);
+  assert.equal(all.per_person_paise, 16600);
+  assert.equal(all.expense_count, 4);
+  assert.equal(all.change_pct, null);
+  assert.deepEqual(all.categories.map(c => [c.category, c.total_paise, c.pct]), [['Food', 21200, 64], ['Stay', 7000, 21], ['Travel', 5000, 15]]);
+  assert.deepEqual(all.top_category, { category: 'Food', total_paise: 21200, pct: 64 });
+  assert.deepEqual(all.members.map(m => [m.name, m.paid_paise, m.paid_pct]), [[a.name, 18200, 55], [owner.name, 15000, 45]]);
+  assert.equal(all.members.find(m => m.user_id === owner.id).is_me, true);
+  assert.ok(all.insights.some(i => i.includes('4% of the event budget')) && all.insights.some(i => i.startsWith('Food')));
+
+  const week = (await get('?window=week&today=2026-09-24')).body;
+  assert.equal(week.spent_paise, 16200);
+  assert.equal(week.total_spent_paise, 33200, 'budget figures are always all-time');
+  assert.equal(week.budget_used_pct, 4);
+  assert.deepEqual(week.range, { from: '2026-09-21', to: '2026-09-27' });
+  assert.equal(week.previous_spent_paise, 10000);
+  assert.equal(week.change_pct, 62);
+  assert.equal(week.trend.length, 7);
+  assert.deepEqual(week.trend.map(d => d.total_paise), [0, 11200, 5000, 0, 0, 0, 0]);
+
+  const month = (await get('?window=month&today=2026-09-24')).body;
+  assert.equal(month.spent_paise, 26200);
+  assert.equal(month.previous_spent_paise, 7000);
+  assert.equal(month.change_pct, 274);
+  assert.equal(month.trend.length, 30);
+
+  assert.equal((await get('?window=decade')).status, 400);
+  assert.equal((await get('?today=2026-02-30')).status, 400);
+  assert.equal((await get('?today=24-09-2026')).status, 400);
+  assert.equal((await get('', await newUser('outsider'))).status, 404);
+  assert.equal((await get('?window=week')).status, 200, 'today defaults to the server date');
+});
+
+test('summary: final balances, category breakdown, settlement status and share text', async () => {
+  const { owner, eventId, members: [a, b] } = await setup({ members: 2 });
+  await addExpense(owner, eventId, owner, 30000, [owner, a, b], { title: 'Cake' });
+  const s = (await api(a, 'GET', `/events/${eventId}/summary`)).body;
+  assert.equal(s.event.title, 'Birthday Party');
+  assert.deepEqual(s.totals, { budget_paise: 800000, spent_paise: 30000, remaining_paise: 770000, budget_used_pct: 4, member_count: 3, expense_count: 1 });
+  assert.deepEqual(s.final_balances.map(x => [x.user_id, x.balance_paise, x.label]), [
+    [owner.id, 20000, 'to_receive'], ...[a, b].map(u => [u.id, -10000, 'to_pay']).sort((x, y) => x[0] < y[0] ? -1 : 1),
+  ]);
+  assert.equal(s.final_balances.find(x => x.user_id === a.id).is_me, true);
+  assert.equal(s.settlement_status.all_settled, false);
+  assert.equal(s.settlement_status.members_to_settle, 2);
+  assert.equal(s.settlement_status.pending_inbound_paise, 20000);
+  assert.equal(s.settlement_status.pending_confirmations, 0);
+  assert.deepEqual(s.categories, [{ category: 'Food', total_paise: 30000, pct: 100 }]);
+  assert.equal(s.deep_link, `spenxo://event/${eventId}`);
+  assert.equal(s.share_text, 'Birthday Party on Spenxo\nBudget: ₹8,000.00\nSpent: ₹300.00\n3 members · 1 expenses');
+  assert.ok(!s.share_text.includes('@'), 'no personal details in shared text');
+
+  await markPaid(a, eventId, owner, 10000);
+  assert.equal((await api(a, 'GET', `/events/${eventId}/summary`)).body.settlement_status.pending_confirmations, 1);
+  assert.equal((await api(await newUser('outsider'), 'GET', `/events/${eventId}/summary`)).status, 404);
+});
+
+test('report.pdf: a valid PDF download for members only, with a safe file name', async () => {
+  const { owner, eventId, members: [a] } = await setup({ members: 1, eventExtra: { title: 'Goa Trip 2026 / "Beach" ✈' } });
+  await addExpense(owner, eventId, owner, 12345, [owner, a], { title: 'Hotel', category: 'Stay' });
+  const r = await api(a, 'GET', `/events/${eventId}/report.pdf`);
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('content-type'), 'application/pdf');
+  assert.equal(r.headers.get('content-disposition'), 'attachment; filename="spenxo-goa-trip-2026-beach-report.pdf"');
+  assert.match(r.headers.get('cache-control'), /no-store/);
+  assert.equal(r.body.subarray(0, 5).toString(), '%PDF-');
+  assert.ok(r.body.length > 4000);
+  assert.equal((await api(await newUser('outsider'), 'GET', `/events/${eventId}/report.pdf`)).status, 404);
+  assert.equal((await api(null, 'GET', `/events/${eventId}/report.pdf`)).status, 401);
+  await api(owner, 'POST', `/events/${eventId}/archive`);
+  assert.equal((await api(a, 'GET', `/events/${eventId}/report.pdf`)).status, 200, 'reports work on archived events too');
+});
+
+test('settlements.csv: exact amounts, one row per settlement, spreadsheet-injection safe', async () => {
+  const { owner, eventId, members: [evil, b] } = await setup({ members: 0 }).then(async s => {
+    const e = await newUser('=cmd');
+    const b2 = await newUser('b');
+    for (const u of [e, b2]) await api(u, 'POST', '/events/join', { code: await inviteCode(s.owner, s.eventId) });
+    return { ...s, members: [e, b2] };
+  });
+  await addExpense(owner, eventId, owner, 30000, [owner, evil, b]);
+  const paid = await markPaid(evil, eventId, owner, 10000, { upi_app: 'gpay', utr: 'T2609271234ABCD' });
+  await api(owner, 'POST', `/events/${eventId}/settlements/${paid.body.settlement.id}/confirm`);
+  await markPaid(b, eventId, owner, 9999, { method: 'cash' });
+
+  const r = await api(b, 'GET', `/events/${eventId}/settlements.csv`);
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('content-type'), /^text\/csv; charset=utf-8/);
+  assert.match(r.headers.get('content-disposition'), /^attachment; filename="spenxo-birthday-party-settlements\.csv"$/);
+  const text = r.body.toString('utf8');
+  assert.ok(text.startsWith('﻿Reference,Date,From,To,Amount (INR),Method,UPI app,UTR,Status,Confirmed at\r\n'));
+  const lines = text.trimEnd().split('\r\n');
+  assert.equal(lines.length, 3);
+  const confirmed = lines.find(l => l.includes('confirmed'));
+  assert.ok(confirmed.includes(`,'${evil.name},`), 'a name starting with = is stored as text, not a formula: ' + confirmed);
+  assert.ok(confirmed.includes(',100.00,upi,gpay,T2609271234ABCD,confirmed,'));
+  assert.ok(lines.find(l => l.includes('pending_confirmation')).includes(',99.99,cash,,,pending_confirmation,'));
+  assert.ok(!text.includes('@') && !text.includes('proof'), 'no emails or file ids');
+  assert.equal((await api(await newUser('outsider'), 'GET', `/events/${eventId}/settlements.csv`)).status, 404);
+});
+
+test('receipt.pdf: only the two people in the payment and the admins can download it', async () => {
+  const { owner, eventId, admins: [admin], members: [a, b] } = await setup({ admins: 1, members: 2 });
+  await addExpense(owner, eventId, owner, 30000, [owner, a, b]);
+  const paid = (await markPaid(a, eventId, owner, 10000)).body.settlement;
+  const url = id => `/events/${eventId}/settlements/${id}/receipt.pdf`;
+
+  for (const [who, label] of [[a, 'payer'], [owner, 'recipient'], [admin, 'admin']]) {
+    const r = await api(who, 'GET', url(paid.id));
+    assert.equal(r.status, 200, label);
+    assert.equal(r.headers.get('content-type'), 'application/pdf');
+    assert.equal(r.headers.get('content-disposition'), `attachment; filename="spenxo-receipt-${paid.reference_code}.pdf"`);
+    assert.equal(r.body.subarray(0, 5).toString(), '%PDF-');
+  }
+  assert.equal((await api(b, 'GET', url(paid.id))).status, 404, 'a bystander gets the same 404 as a missing receipt');
+  assert.equal((await api(owner, 'GET', url(randomUUID()))).status, 404);
+  await api(owner, 'POST', `/events/${eventId}/settlements/${paid.id}/confirm`);
+  assert.equal((await api(a, 'GET', url(paid.id))).status, 200, 'and after confirmation');
+  assert.equal((await api(await newUser('outsider'), 'GET', url(paid.id))).status, 404);
+});
+
+// ── notifications ───────────────────────────────────────────────
+
+const tokenOf = user => `fcm-token-${user.id}`;
+const registerToken = (user, token = tokenOf(user)) => api(user, 'POST', '/me/device-tokens', { token, platform: 'android' });
+const takePushes = async () => { await flushNotifications(); return push.sent.splice(0); };
+const recipientsOf = calls => calls.flatMap(c => c.tokens).sort();
+
+test('device tokens: register, move to the new account, cap per user, remove', async () => {
+  const [u1, u2] = [await newUser('a'), await newUser('b')];
+  assert.equal((await api(null, 'POST', '/me/device-tokens', { token: 'x'.repeat(30) })).status, 401);
+  assert.equal((await api(u1, 'POST', '/me/device-tokens', { token: 'short' })).status, 400);
+  assert.equal((await api(u1, 'POST', '/me/device-tokens', { token: 'has space in it ' + 'x'.repeat(20) })).status, 400);
+  assert.equal((await api(u1, 'POST', '/me/device-tokens', { token: 'x'.repeat(30), platform: 'windows' })).status, 400);
+  assert.equal((await registerToken(u1)).status, 201);
+  assert.equal((await registerToken(u1)).status, 201, 'registering twice is harmless');
+  assert.equal((await pool.query('select count(*)::int c from device_tokens where token = $1', [tokenOf(u1)])).rows[0].c, 1);
+
+  assert.equal((await registerToken(u2, tokenOf(u1))).status, 201, 'another account signs in on the same phone');
+  assert.equal((await pool.query('select user_id from device_tokens where token = $1', [tokenOf(u1)])).rows[0].user_id, u2.id, 'the token moved with the phone');
+
+  assert.equal((await api(u1, 'DELETE', '/me/device-tokens', { token: tokenOf(u1) })).status, 200);
+  assert.equal((await pool.query('select count(*)::int c from device_tokens where token = $1', [tokenOf(u1)])).rows[0].c, 1, 'you cannot remove someone else\'s token');
+  assert.equal((await api(u2, 'DELETE', '/me/device-tokens', { token: tokenOf(u1) })).status, 200);
+  assert.equal((await pool.query('select count(*)::int c from device_tokens where token = $1', [tokenOf(u1)])).rows[0].c, 0);
+
+  for (let i = 0; i < 13; i++) await registerToken(u1, `bulk-token-${i}-` + 'x'.repeat(20));
+  assert.equal((await pool.query('select count(*)::int c from device_tokens where user_id = $1', [u1.id])).rows[0].c, 10, 'only the 10 newest are kept');
+});
+
+test('notification preferences: design defaults, partial updates, per member, members only', async () => {
+  const { owner, eventId, members: [a] } = await setup({ members: 1 });
+  const url = `/events/${eventId}/notification-prefs`;
+  assert.deepEqual((await api(a, 'GET', url)).body.prefs, { expenses: true, members: false, settlements: true, chat: true });
+  assert.deepEqual((await api(a, 'PUT', url, { expenses: false, members: true })).body.prefs, { expenses: false, members: true, settlements: true, chat: true });
+  assert.deepEqual((await api(a, 'GET', url)).body.prefs, { expenses: false, members: true, settlements: true, chat: true }, 'saved');
+  assert.deepEqual((await api(a, 'PUT', url, { chat: false })).body.prefs, { expenses: false, members: true, settlements: true, chat: false }, 'a partial update keeps the rest');
+  assert.deepEqual((await api(owner, 'GET', url)).body.prefs, { expenses: true, members: false, settlements: true, chat: true }, 'each member has their own');
+  assert.equal((await api(a, 'PUT', url, {})).status, 400);
+  assert.equal((await api(a, 'PUT', url, { sound: true })).status, 400);
+  assert.equal((await api(a, 'PUT', url, { chat: 'yes' })).status, 400);
+  assert.equal((await api(await newUser('outsider'), 'GET', url)).status, 404);
+  assert.equal((await api(await newUser('outsider'), 'PUT', url, { chat: true })).status, 404);
+  await api(owner, 'POST', `/events/${eventId}/complete`);
+  assert.equal((await api(a, 'PUT', url, { chat: true })).status, 200, 'switches still work after an event ends');
+});
+
+test('push: expenses reach the other members only, and each member\'s switch is respected', async () => {
+  const { owner, eventId, members: [a, b] } = await setup({ members: 2 });
+  for (const u of [owner, a, b]) await registerToken(u);
+  await takePushes();
+
+  await addExpense(a, eventId, a, 200000, [owner, a, b], { title: 'Cake' });
+  const calls = await takePushes();
+  assert.deepEqual(recipientsOf(calls), [tokenOf(owner), tokenOf(b)].sort(), 'everyone except the person who added it');
+  assert.equal(calls[0].payload.title, 'Birthday Party');
+  assert.equal(calls[0].payload.body, `${a.name} added Cake — ₹2,000.00`);
+  assert.equal(calls[0].payload.data.route, 'expenses');
+  assert.equal(calls[0].payload.data.eventId, eventId);
+
+  await api(b, 'PUT', `/events/${eventId}/notification-prefs`, { expenses: false });
+  await addExpense(owner, eventId, owner, 1000, [owner, a, b], { title: 'Snacks' });
+  assert.deepEqual(recipientsOf(await takePushes()), [tokenOf(a)], 'b switched expense updates off');
+
+  const e = (await api(owner, 'GET', `/events/${eventId}/expenses`)).body.expenses[0];
+  await api(owner, 'DELETE', `/events/${eventId}/expenses/${e.id}`);
+  assert.deepEqual(recipientsOf(await takePushes()), [tokenOf(a)], 'removals follow the same switch');
+});
+
+test('push: member activity is off by default; join requests, approvals and removals always arrive', async () => {
+  const { owner, eventId, admins: [admin], members: [a] } = await setup({ admins: 1, members: 1 });
+  for (const u of [owner, admin, a]) await registerToken(u);
+  await takePushes();
+
+  const newcomer = await newUser('newcomer');
+  await registerToken(newcomer);
+  assert.equal((await api(newcomer, 'POST', '/events/join', { code: await inviteCode(owner, eventId) })).status, 200);
+  assert.deepEqual(await takePushes(), [], 'default: member activity is quiet');
+
+  await api(a, 'PUT', `/events/${eventId}/notification-prefs`, { members: true });
+  const second = await newUser('second');
+  await registerToken(second);
+  await api(second, 'POST', '/events/join', { code: await inviteCode(owner, eventId) });
+  assert.deepEqual(recipientsOf(await takePushes()), [tokenOf(a)], 'only the member who opted in hears about joiners');
+
+  // approvals: an action item for staff, whatever their switches say
+  await api(owner, 'PATCH', `/events/${eventId}/settings`, { join_policy: 'code_approval' });
+  const asker = await newUser('asker');
+  await registerToken(asker);
+  await api(asker, 'POST', '/events/join', { code: await inviteCode(owner, eventId) });
+  const calls = await takePushes();
+  assert.deepEqual(recipientsOf(calls), [tokenOf(owner), tokenOf(admin)].sort(), 'owner and admins, not regular members');
+  assert.equal(calls[0].payload.data.route, 'members');
+
+  await api(admin, 'POST', `/events/${eventId}/members/${asker.id}/approve`);
+  const approved = await takePushes();
+  assert.deepEqual(recipientsOf(approved), [tokenOf(asker)]);
+  assert.equal(approved[0].payload.body, 'Your request to join was approved.');
+
+  await api(owner, 'POST', `/events/${eventId}/members/${second.id}/remove`);
+  const removed = await takePushes();
+  assert.deepEqual(recipientsOf(removed), [tokenOf(second)], 'the removed person is told, nobody else');
+  assert.equal(removed[0].payload.body, 'You were removed from this event.');
+});
+
+test('push: chat never leaks the text; settlements go to the right person; reminders always arrive', async () => {
+  const { owner, eventId, members: [a, b] } = await setup({ members: 2 });
+  for (const u of [owner, a, b]) await registerToken(u);
+  await takePushes();
+
+  await sendMsg(owner, eventId, 'the secret surprise is at 7pm');
+  const chat = await takePushes();
+  assert.deepEqual(recipientsOf(chat), [tokenOf(a), tokenOf(b)].sort());
+  assert.equal(chat[0].payload.body, `${owner.name} sent a message`);
+  assert.equal(chat[0].payload.tag, `chat-${eventId}`);
+  assert.ok(!JSON.stringify(chat).includes('secret surprise'), 'the message text never goes through the push service');
+  await api(b, 'PUT', `/events/${eventId}/notification-prefs`, { chat: false });
+  await sendMsg(owner, eventId, 'another one');
+  assert.deepEqual(recipientsOf(await takePushes()), [tokenOf(a)]);
+
+  await addExpense(owner, eventId, owner, 30000, [owner, a, b]);
+  await takePushes();
+  const paid = (await markPaid(a, eventId, owner, 10000)).body.settlement;
+  const created = await takePushes();
+  assert.deepEqual(recipientsOf(created), [tokenOf(owner)], 'the recipient is asked to confirm');
+  assert.equal(created[0].payload.body, `${a.name} marked ₹100.00 as paid. Confirm once you receive it.`);
+  assert.equal(created[0].payload.data.settlementId, paid.id);
+  assert.ok(!JSON.stringify(created).includes('T26') && !JSON.stringify(created).includes('@'), 'no payment details in pushes');
+
+  await api(owner, 'POST', `/events/${eventId}/settlements/${paid.id}/confirm`);
+  const confirmed = await takePushes();
+  assert.deepEqual(recipientsOf(confirmed), [tokenOf(a)]);
+  assert.equal(confirmed[0].payload.body, `${owner.name} confirmed your ₹100.00 payment.`);
+
+  const second = (await markPaid(b, eventId, owner, 10000)).body.settlement;
+  await takePushes();
+  await api(owner, 'POST', `/events/${eventId}/settlements/${second.id}/reject`, { reason: 'wrong amount' });
+  assert.deepEqual(recipientsOf(await takePushes()), [tokenOf(b)]);
+
+  await api(b, 'PUT', `/events/${eventId}/notification-prefs`, { settlements: false });
+  assert.equal((await api(owner, 'POST', `/events/${eventId}/remind`, { target_user: b.id, kind: 'remind' })).status, 200);
+  const reminder = await takePushes();
+  assert.deepEqual(recipientsOf(reminder), [tokenOf(b)], 'a reminder reaches b even with settlement updates off');
+  assert.equal(reminder[0].payload.title, 'Payment reminder');
+  assert.equal(reminder[0].payload.body, `${owner.name} reminded you to settle ₹100.00 for Birthday Party.`);
+});
+
+test('push: completing, reopening and deleting an event tell the right people', async () => {
+  const { owner, eventId, members: [a] } = await setup({ members: 1 });
+  for (const u of [owner, a]) await registerToken(u);
+  await takePushes();
+
+  await api(owner, 'POST', `/events/${eventId}/complete`);
+  const done = await takePushes();
+  assert.deepEqual(recipientsOf(done), [tokenOf(a)]);
+  assert.equal(done[0].payload.body, 'The event is complete and everything is settled.');
+  await api(owner, 'POST', `/events/${eventId}/reopen`);
+  assert.equal((await takePushes())[0].payload.body, 'The event was reopened.');
+
+  await api(owner, 'DELETE', `/events/${eventId}`, { confirm: true });
+  const deleted = await takePushes();
+  assert.deepEqual(recipientsOf(deleted), [tokenOf(a)], 'everyone but the owner who did it');
+  assert.equal(deleted[0].payload.title, 'Birthday Party');
+  assert.equal(deleted[0].payload.body, 'This event was deleted by its owner.');
+  assert.equal(deleted[0].payload.data.route, 'events');
+});
+
+test('push: dead tokens are cleaned up, a failing sender never breaks the request, other devices still get theirs', async () => {
+  const { owner, eventId, members: [a] } = await setup({ members: 1 });
+  await registerToken(owner);
+  await registerToken(a, `fcm-token-${a.id}-phone`);
+  await registerToken(a, `fcm-token-${a.id}-tablet`);
+  await takePushes();
+
+  push.dead.add(`fcm-token-${a.id}-tablet`);
+  await addExpense(owner, eventId, owner, 5000, [owner, a]);
+  const calls = await takePushes();
+  assert.deepEqual(recipientsOf(calls), [`fcm-token-${a.id}-phone`, `fcm-token-${a.id}-tablet`].sort(), 'both devices were tried');
+  const left = (await pool.query('select token from device_tokens where user_id = $1', [a.id])).rows.map(r => r.token);
+  assert.deepEqual(left, [`fcm-token-${a.id}-phone`], 'the token the push service rejected is gone');
+
+  push.failNext = true;
+  const ok = await addExpense(owner, eventId, owner, 6000, [owner, a], { title: 'While push is down' });
+  assert.equal(ok.title, 'While push is down', 'the expense was saved even though sending failed');
+  await takePushes();
+  assert.equal((await api(a, 'GET', `/events/${eventId}/expenses`)).body.expenses.length, 2);
 });

@@ -13,6 +13,7 @@ export type DomainEvent =
   | { type: 'expense.added' | 'expense.updated' | 'expense.voided'; eventId: string; actorId: string; expenseId: string; title: string; amountPaise: number }
   | { type: 'member.joined' | 'member.requested' | 'member.approved' | 'member.rejected' | 'member.removed' | 'member.left'; eventId: string; actorId: string; userId: string }
   | { type: 'settlement.created' | 'settlement.confirmed' | 'settlement.rejected' | 'settlement.cancelled'; eventId: string; actorId: string; settlementId: string; fromUser: string; toUser: string; amountPaise: number }
+  | { type: 'chat.message'; eventId: string; actorId: string; messageId: string }
   | { type: 'reminder.sent'; eventId: string; actorId: string; targetUser: string; kind: 'remind' | 'request'; amountPaise: number };
 
 export const domainEvents = new EventEmitter();

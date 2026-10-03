@@ -33,7 +33,7 @@ export async function postSystemMessage(
   payload: { type: string } & Record<string, unknown>,
 ): Promise<void> {
   await db.query(
-    "insert into event_messages (id, event_id, kind, system_payload) values ($1, $2, 'system', $3)",
+    "insert into event_messages (id, event_id, kind, system_payload, created_at) values ($1, $2, 'system', $3, clock_timestamp())",
     [randomUUID(), eventId, JSON.stringify(payload)],
   );
 }

@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'crypto';
-import { PoolClient } from 'pg';
 import { pool } from '../../db/pool';
 import { env } from '../../config/env';
 import { HttpError } from '../../lib/httpError';
@@ -69,7 +68,7 @@ export async function findFile(fileId: string): Promise<FileRecord | null> {
  * user, and have the right purpose. Run inside the event transaction.
  */
 export async function assertFileAttachable(
-  client: PoolClient,
+  client: { query: (text: string, params?: unknown[]) => Promise<{ rows: unknown[] }> },
   fileId: string,
   eventId: string,
   userId: string,

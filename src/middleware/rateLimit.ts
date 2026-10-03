@@ -56,3 +56,23 @@ export const uploadLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'too_many_uploads' },
 });
+
+// Keyed by user: 60 chat messages per minute.
+export const chatLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  keyGenerator: (req) => req.userId,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'too_many_messages' },
+});
+
+// Keyed by user: PDF/CSV generation is CPU-heavy, 20 per minute.
+export const reportLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 20,
+  keyGenerator: (req) => req.userId,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'too_many_downloads' },
+});

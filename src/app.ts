@@ -12,6 +12,7 @@ import filesRoutes from './modules/files/files.routes';
 import eventsRouter from './modules/events/events.router';
 import { meRoutes } from './modules/events/settlements/settlements.routes';
 import { requireAuth } from './middleware/requireAuth';
+import { deviceRoutes } from './modules/notifications/notifications.routes';
 import authRoutes from './modules/auth/auth.routes';
 import transactionsRoutes from './modules/transactions/transactions.routes';
 import goalsRoutes from './modules/goals/goals.routes';
@@ -52,6 +53,7 @@ export function createApp() {
   app.use('/ai', aiRoutes);
   app.use('/events', eventsRouter);
   app.use('/me', requireAuth, meRoutes);
+  app.use('/me', requireAuth, deviceRoutes);
   app.use(filesRoutes);
 
   app.use(notFound);
