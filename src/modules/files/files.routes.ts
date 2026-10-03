@@ -5,6 +5,7 @@ import { requireAuth } from '../../middleware/requireAuth';
 import { uploadLimiter } from '../../middleware/rateLimit';
 import { HttpError } from '../../lib/httpError';
 import { can, eventContext } from '../events/access';
+import { pool } from '../../db/pool';
 import { MAX_FILE_BYTES, findFile, saveFile, storage } from './files.service';
 
 const router = Router();
@@ -14,6 +15,23 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_FILE_BYTES, files: 1, fields: 4, parts: 6 },
 });
+
+/**
+ * Receipts and chat images are visible to every member. A payment-proof screenshot can show
+ * account details, so it is limited to the uploader, the two people in the settlement it was
+ * attached to, and the owner/admins. Anyone else gets the same 404 as a missing file.
+ */
+async function assertReadable(req: Request): Promise<void> {
+  const file = req.fileRow!;
+  if (file.purpose !== 'proof') return;
+  const ctx = req.eventCtx!;
+  if (file.owner_id === req.userId || ctx.role === 'owner' || ctx.role === 'admin') return;
+  const { rows } = await pool.query(
+    'select 1 from event_settlements where proof_file_id = $1 and (from_user = $2 or to_user = $2)',
+    [file.id, req.userId],
+  );
+  if (!rows[0]) throw new HttpError(404, 'file_not_found');
+}
 
 const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) =>
   (req: Request, res: Response, next: NextFunction) => { fn(req, res).catch(next); };
@@ -54,6 +72,7 @@ router.get(
   }),
   can('file.read', req => ({ event_id: req.fileRow!.event_id })),
   wrap(async (req, res) => {
+    await assertReadable(req);
     const file = req.fileRow!;
     if (!(await storage.exists(file.storage_key))) throw new HttpError(404, 'file_not_found');
     res.setHeader('Content-Type', file.mime);

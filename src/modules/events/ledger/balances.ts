@@ -70,3 +70,46 @@ export function assertSettlementAllowed(
 export function isFullySettled(balances: Balances): boolean {
   return Object.values(balances).every(v => v === 0);
 }
+
+/**
+ * The "Your balance" card on the Balances screen: gross position against each
+ * other member, as opposed to the simplified suggestions.
+ *
+ *   by_member[b] > 0  -> I owe b that much (after netting what b owes me)
+ *   by_member[b] < 0  -> b owes me that much
+ *   you_owe_paise - owed_paise  ===  -(my net balance)   (always)
+ *
+ * Only active expenses and confirmed settlements count, like computeBalances.
+ */
+export function computePairwise(
+  me: string,
+  expenses: LedgerExpense[],
+  settlements: LedgerSettlement[],
+): { by_member: Record<string, number>; you_owe_paise: number; owed_paise: number } {
+  const byMember: Record<string, number> = {};
+  const add = (other: string, delta: number) => {
+    byMember[other] = (byMember[other] ?? 0) + delta;
+  };
+
+  for (const e of expenses) {
+    if (e.status !== 'active') continue;
+    for (const s of e.shares) {
+      if (s.user_id === e.paid_by) continue; // paying for yourself moves nothing
+      if (s.user_id === me) add(e.paid_by, s.share_paise); // I owe the payer
+      else if (e.paid_by === me) add(s.user_id, -s.share_paise); // they owe me
+    }
+  }
+  for (const s of settlements) {
+    if (s.status !== 'confirmed') continue;
+    if (s.from_user === me) add(s.to_user, -s.amount_paise); // I paid them
+    else if (s.to_user === me) add(s.from_user, s.amount_paise); // they paid me
+  }
+
+  let youOwe = 0;
+  let owed = 0;
+  for (const d of Object.values(byMember)) {
+    if (d > 0) youOwe += d;
+    else owed += -d;
+  }
+  return { by_member: byMember, you_owe_paise: youOwe, owed_paise: owed };
+}

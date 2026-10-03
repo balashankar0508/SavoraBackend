@@ -11,7 +11,8 @@
     "migrate": "ts-node src/db/migrate.ts",
     "smoke-test": "bash scripts/smoke-test.sh",
     "test": "node --require ts-node/register/transpile-only --test \"src/**/*.test.ts\"",
-    "typecheck:tests": "tsc -p tsconfig.test.json"
+    "typecheck:tests": "tsc -p tsconfig.test.json",
+    "test:integration": "npm run build && node --test scripts/test-events.cjs"
   },
   "engines": {
     "node": ">=20.0.0"

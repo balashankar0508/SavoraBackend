@@ -50,6 +50,7 @@ function layout(bodyHtml: string): string {
 }
 
 async function send(params: { to: string; subject: string; text: string; html: string }): Promise<void> {
+  if (env.NODE_ENV === 'test') return; // never hit Brevo from tests
   try {
     const res = await fetch('https://api.brevo.com/v3/smtp/email', {
       method: 'POST',
@@ -132,6 +133,53 @@ export async function sendResetEmail(email: string, deepLink: string): Promise<v
     to: email,
     subject: 'Reset your Spenxo password',
     text: `Tap this link on your phone to reset your password: ${deepLink}\n\nThis link expires in 30 minutes. If you didn't request this, ignore this email.`,
+    html,
+  });
+}
+
+const escapeHtml = (v: string) =>
+  v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/** Invitation to join an event. Carries the code (typed into "Join with invite") and a deep link. */
+export async function sendEventInviteEmail(
+  email: string,
+  details: { inviterName: string; eventTitle: string; code: string; deepLink: string },
+): Promise<void> {
+  if (env.NODE_ENV !== 'production') {
+    console.log(`[dev mailer] Event invite for ${email}: ${details.code} ${details.deepLink}`);
+  }
+  const inviter = escapeHtml(details.inviterName);
+  const title = escapeHtml(details.eventTitle);
+
+  const html = layout(`
+    <h1 style="margin:0 0 8px;font-size:20px;">You're invited to ${title}</h1>
+    <p style="margin:0 0 24px;font-size:14px;color:${COLORS.inkMuted};line-height:1.5;">
+      ${inviter} invited you to split expenses for this event on Spenxo.
+    </p>
+    <div style="background:${COLORS.accentTint};border-radius:8px;padding:20px;text-align:center;margin:0 0 24px;">
+      <div style="font-size:12px;color:${COLORS.inkMuted};letter-spacing:0.08em;margin-bottom:8px;">INVITATION CODE</div>
+      <span style="font-family:'Courier New',monospace;font-size:26px;font-weight:700;letter-spacing:4px;color:${COLORS.accentStrong};">${escapeHtml(details.code)}</span>
+    </div>
+    <div style="text-align:center;margin:0 0 24px;">
+      <a href="${escapeHtml(details.deepLink)}" style="display:inline-block;background:${COLORS.accent};color:#FFFFFF;font-size:15px;font-weight:600;text-decoration:none;padding:12px 28px;border-radius:6px;">
+        Open in Spenxo
+      </a>
+    </div>
+    <p style="margin:0;font-size:13px;color:${COLORS.inkMuted};line-height:1.5;">
+      In the app, open Events &rarr; Join with invite and enter the code. Sign up with this email address if you don't have an account yet.
+      The code expires in 7 days. If you weren't expecting this, you can ignore this email.
+    </p>
+  `);
+
+  await send({
+    to: email,
+    subject: `${details.inviterName} invited you to ${details.eventTitle} on Spenxo`,
+    text: `${details.inviterName} invited you to "${details.eventTitle}" on Spenxo.
+
+Invitation code: ${details.code}
+Open: ${details.deepLink}
+
+In the app: Events > Join with invite. The code expires in 7 days.`,
     html,
   });
 }

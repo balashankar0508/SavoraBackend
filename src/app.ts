@@ -9,6 +9,9 @@ import { errorHandler } from './middleware/errorHandler';
 import { notFound } from './middleware/notFound';
 import { requestId } from './middleware/requestId';
 import filesRoutes from './modules/files/files.routes';
+import eventsRouter from './modules/events/events.router';
+import { meRoutes } from './modules/events/settlements/settlements.routes';
+import { requireAuth } from './middleware/requireAuth';
 import authRoutes from './modules/auth/auth.routes';
 import transactionsRoutes from './modules/transactions/transactions.routes';
 import goalsRoutes from './modules/goals/goals.routes';
@@ -47,9 +50,8 @@ export function createApp() {
   app.use('/transactions', transactionsRoutes);
   app.use('/goals', goalsRoutes);
   app.use('/ai', aiRoutes);
-  // Events v2 routers are mounted here as they are built (T2/T3). The pre-v2
-  // routers (events.routes.ts, events.experience.routes.ts) are intentionally
-  // unmounted: they target tables dropped by migration 008 and are deleted in T2.
+  app.use('/events', eventsRouter);
+  app.use('/me', requireAuth, meRoutes);
   app.use(filesRoutes);
 
   app.use(notFound);

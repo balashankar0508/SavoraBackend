@@ -5,7 +5,7 @@ import path from 'node:path';
 import {
   splitExpense, SplitMode, SplitInput,
   computeBalances, maxSettlement, assertSettlementAllowed, isFullySettled,
-  suggestTransfers, assertLedgerConsistent, computeEventStats, windowRange,
+  suggestTransfers, assertLedgerConsistent, computeEventStats, windowRange, computePairwise,
   parseRupees, formatINR, assertPaise, LedgerError,
   LedgerExpense, LedgerSettlement,
 } from './index';
@@ -327,4 +327,57 @@ test('stats: windows, zero-filled trend, no budget, over budget, no expenses', (
     expenses: [{ ...sx('a', 999, 'Food', '2026-09-22', members), status: 'voided' as const }],
   });
   assert.equal(voided.spent_paise, 0);
+});
+
+// ── pairwise (Balances screen "Your balance" card) ───────────────
+test('computePairwise: gross owe/owed, netted per person, matches the net balance', () => {
+  const expenses = [
+    expense('a', 90000, { a: 30000, b: 30000, c: 30000 }),
+    expense('b', 30000, { a: 10000, b: 10000, c: 10000 }),
+    expense('c', 99999, { a: 99999 }, 'voided'),
+  ];
+  const p = computePairwise('a', expenses, []);
+  // b owes a 30000 and a owes b 10000 -> b owes a 20000 net; c owes a 30000, a owes c 0
+  assert.deepEqual(p.by_member, { b: -20000, c: -30000 });
+  assert.equal(p.owed_paise, 50000);
+  assert.equal(p.you_owe_paise, 0);
+
+  const confirmed = [settlement('c', 'a', 20000, 'confirmed'), settlement('b', 'a', 5000, 'pending_confirmation')];
+  const q = computePairwise('a', expenses, confirmed);
+  assert.deepEqual(q.by_member, { b: -20000, c: -10000 });
+  const net = computeBalances(['a', 'b', 'c'], expenses, confirmed);
+  assert.equal(q.owed_paise - q.you_owe_paise, net.a);
+});
+
+test('computePairwise: debt both ways at once (design: you owe 400, owed 850)', () => {
+  const expenses = [
+    expense('a', 100000, { b: 85000, a: 15000 }),   // b owes a 85000
+    expense('c', 40000, { a: 40000 }),               // a owes c 40000
+  ];
+  const p = computePairwise('a', expenses, []);
+  assert.equal(p.owed_paise, 85000);
+  assert.equal(p.you_owe_paise, 40000);
+  assert.equal(computeBalances(['a', 'b', 'c'], expenses, []).a, 45000); // +450 net, as in the design
+});
+
+test('computePairwise property: owed - you_owe always equals the net balance', () => {
+  const rand = rng(555);
+  for (let iter = 0; iter < 300; iter++) {
+    const users = ids(2 + Math.floor(rand() * 5));
+    const expenses: LedgerExpense[] = [];
+    for (let k = 0; k < 1 + Math.floor(rand() * 6); k++) {
+      const amount = 1 + Math.floor(rand() * 100000);
+      const participants = users.filter(() => rand() > 0.3);
+      if (!participants.length) participants.push(users[0]);
+      const shares = splitExpense(amount, 'equal', participants.map(user_id => ({ user_id, value: 0 })));
+      expenses.push({ paid_by: users[Math.floor(rand() * users.length)], amount_paise: amount, status: 'active', shares: shares.map(s => ({ user_id: s.user_id, share_paise: s.share_paise })) });
+    }
+    const balances = computeBalances(users, expenses, []);
+    const settlements = suggestTransfers(balances).slice(0, 2).map(t => settlement(t.from, t.to, t.amount_paise, 'confirmed'));
+    const after = computeBalances(users, expenses, settlements);
+    for (const u of users) {
+      const p = computePairwise(u, expenses, settlements);
+      assert.equal(p.owed_paise - p.you_owe_paise, after[u], `user ${u}`);
+    }
+  }
 });
