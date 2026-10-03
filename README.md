@@ -17,6 +17,13 @@ openssl rand -hex 32   # JWT_ACCESS_SECRET
 openssl rand -hex 32   # JWT_REFRESH_PEPPER
 ```
 
+## Tests
+
+```bash
+npm test               # unit tests: ledger (money/split/balances/stats), authorization policy, file storage
+npm run typecheck:tests
+```
+
 ## Smoke testing
 
 ```bash
@@ -123,6 +130,9 @@ Postgres itself stays a single primary for now; read replicas/sharding are futur
 | `ANTHROPIC_API_KEY` | Optional — Claude Haiku 4.5 fallback for `/ai/parse-receipt` when Gemini is overloaded (503). Leave unset to skip the fallback. |
 | `BREVO_API_KEY`, `MAIL_FROM` | Transactional email (Brevo) for OTP + password reset links |
 | `CORS_ORIGIN` | Mobile app has no browser origin; `*` is fine, tighten if a web client is ever added |
+| `UPLOAD_DIR` | Private folder for event receipts, payment proofs and chat images. Must be outside the repo and web root. Production: `/var/lib/spenxo/uploads`, mode `700`, owned by the app user. Include it in backups. |
+| `CHAT_ENCRYPTION_KEY` | 64 hex chars (`openssl rand -hex 32`). AES-256-GCM key for chat messages at rest. **Required** - the server will not start without it. Losing it makes old chat unreadable, so back it up separately from the database. |
+| `INVITE_CODE_KEY` | 64 hex chars (`openssl rand -hex 32`). Keys the lookup hash and encrypted copy of event invite codes. **Required.** Do not reuse the JWT secrets. |
 
 `.env` must never be committed — it's already in `.gitignore`.
 

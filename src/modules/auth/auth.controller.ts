@@ -60,3 +60,9 @@ export async function meHandler(req: Request, res: Response) {
   const result = await service.me(req.userId);
   res.json(result);
 }
+
+export async function changePasswordHandler(req: Request, res: Response) {
+  const { currentPassword, newPassword } = schemas.changePasswordSchema.parse(req.body);
+  const result = await service.changePassword(req.userId, currentPassword, newPassword);
+  res.json(result);
+}

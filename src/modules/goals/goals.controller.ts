@@ -33,3 +33,22 @@ export async function contributeHandler(req: Request, res: Response) {
   if (!goal) throw new HttpError(404, 'not_found');
   res.json({ goal });
 }
+
+export async function listContributionsHandler(req: Request, res: Response) {
+  const contributions = await repo.listContributions(req.userId, req.params.id);
+  if (!contributions) throw new HttpError(404, 'not_found');
+  res.json({ contributions });
+}
+
+export async function addContributionHandler(req: Request, res: Response) {
+  const data = schemas.addContributionSchema.parse(req.body);
+  const result = await repo.addContribution(req.userId, req.params.id, data);
+  if (!result) throw new HttpError(404, 'not_found');
+  res.status(201).json(result);
+}
+
+export async function deleteContributionHandler(req: Request, res: Response) {
+  const goal = await repo.deleteContribution(req.userId, req.params.id, req.params.contributionId);
+  if (!goal) throw new HttpError(404, 'not_found');
+  res.json({ goal });
+}

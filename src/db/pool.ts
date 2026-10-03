@@ -10,6 +10,11 @@ import { env } from '../config/env';
 // instead of addition once there's more than one row.
 types.setTypeParser(types.builtins.NUMERIC, (val) => parseFloat(val));
 
+// bigint (SUM/COUNT, int8) comes back as a string by default. Every value in
+// this schema is far below 2^53 (money is capped at 1e9 paise per row), so
+// parse to numbers for the same reason as NUMERIC above.
+types.setTypeParser(types.builtins.INT8, (val) => parseInt(val, 10));
+
 export const pool = new Pool({
   connectionString: env.DATABASE_URL,
 });

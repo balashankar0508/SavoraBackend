@@ -13,6 +13,10 @@ export const logger = pino({
       'req.body.token',
       'req.body.refreshToken',
       'req.body.image', // base64 receipt image — large and not useful in logs
+      'req.body.utr',
+      'req.body.upi_id',
+      'req.body.ciphertext',
+      'req.body.file_data',
     ],
     censor: '[redacted]',
   },

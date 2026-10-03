@@ -1,5 +1,9 @@
 import 'dotenv/config';
+import path from 'path';
 import { z } from 'zod';
+
+const hex32 = (name: string) =>
+  z.string().regex(/^[a-f0-9]{64}$/, `${name} must be 64 hex chars (openssl rand -hex 32)`);
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
@@ -15,6 +19,14 @@ const envSchema = z.object({
   BREVO_API_KEY: z.string().min(1, 'BREVO_API_KEY is required'),
   MAIL_FROM: z.string().min(1, 'MAIL_FROM is required'),
   CORS_ORIGIN: z.string().default('*'),
+  // Events v2
+  // Private directory for uploaded receipts/proofs/chat images. Must be outside
+  // the web root and the repo; production: /var/lib/spenxo/uploads (mode 700).
+  UPLOAD_DIR: z.string().min(1).default(path.join(process.cwd(), 'uploads')),
+  // AES-256-GCM key for chat messages at rest.
+  CHAT_ENCRYPTION_KEY: hex32('CHAT_ENCRYPTION_KEY'),
+  // Keys the HMAC lookup hash and AES-GCM display copy of event invite codes.
+  INVITE_CODE_KEY: hex32('INVITE_CODE_KEY'),
 });
 
 const parsed = envSchema.safeParse(process.env);

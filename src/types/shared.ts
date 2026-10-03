@@ -45,6 +45,15 @@ export interface Goal {
   created_at?: string;
 }
 
+export interface GoalContribution {
+  id: string;
+  goal_id: string;
+  amount: number;
+  note: string | null;
+  contribution_date: string;
+  created_at: string;
+}
+
 export interface MonthlySummary {
   month: string;
   income: number;

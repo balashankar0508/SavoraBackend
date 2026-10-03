@@ -16,4 +16,8 @@ router.patch('/:id', wrap(ctrl.updateHandler));
 router.delete('/:id', wrap(ctrl.deleteHandler));
 router.post('/:id/contribute', wrap(ctrl.contributeHandler));
 
+router.get('/:id/contributions', wrap(ctrl.listContributionsHandler));
+router.post('/:id/contributions', wrap(ctrl.addContributionHandler));
+router.delete('/:id/contributions/:contributionId', wrap(ctrl.deleteContributionHandler));
+
 export default router;

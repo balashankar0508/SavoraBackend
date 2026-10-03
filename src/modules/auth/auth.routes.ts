@@ -17,6 +17,7 @@ router.post('/refresh', authLimiter, wrap(ctrl.refreshHandler));
 router.post('/logout', authLimiter, wrap(ctrl.logoutHandler));
 router.post('/forgot-password', authLimiter, wrap(ctrl.forgotPasswordHandler));
 router.post('/reset-password', authLimiter, wrap(ctrl.resetPasswordHandler));
+router.post('/change-password', requireAuth, authLimiter, wrap(ctrl.changePasswordHandler));
 router.patch('/profile', requireAuth, wrap(ctrl.updateProfileHandler));
 router.get('/me', requireAuth, wrap(ctrl.meHandler));
 

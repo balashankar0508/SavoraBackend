@@ -39,3 +39,13 @@ export const invitationLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'too_many_invitation_attempts' },
 });
+
+// Keyed by user (requireAuth runs first): 20 uploads per hour.
+export const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 20,
+  keyGenerator: (req) => req.userId,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'too_many_uploads' },
+});

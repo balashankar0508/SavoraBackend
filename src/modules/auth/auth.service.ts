@@ -167,3 +167,21 @@ export async function me(userId: string): Promise<{ user: User; tier: Subscripti
   const tier = await repo.fetchTier(userId);
   return { user: toPublicUser(row), tier };
 }
+
+export async function changePassword(
+  userId: string,
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ tokens: TokenPair }> {
+  const user = await repo.findUserById(userId);
+  if (!user) throw new HttpError(404, 'user_not_found');
+
+  const valid = await comparePassword(currentPassword, user.password_hash);
+  if (!valid) throw new HttpError(401, 'invalid_current_password');
+
+  await repo.updateUserPassword(userId, await hashPassword(newPassword));
+  // Sign out every other device; this one gets a fresh pair.
+  await repo.revokeAllUserRefreshTokens(userId);
+  const tokens = await issueTokenPair(user.id, user.email);
+  return { tokens };
+}
