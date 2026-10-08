@@ -22,12 +22,15 @@ export async function createGoal(
   return rows[0];
 }
 
+const GOAL_COLUMNS = new Set(['title', 'target_amount', 'current_amount', 'target_date']);
+
 export async function updateGoal(
   userId: string,
   id: string,
   updates: Partial<{ title: string; target_amount: number; current_amount: number; target_date: string }>,
 ): Promise<Goal | null> {
-  const fields = Object.keys(updates);
+  // only known columns can ever reach the SQL text (defence in depth: the schema also strips unknown keys)
+  const fields = Object.keys(updates).filter(f => GOAL_COLUMNS.has(f));
   if (fields.length === 0) {
     const { rows } = await pool.query<Goal>('select * from goals where id = $1 and user_id = $2', [id, userId]);
     return rows[0] ?? null;

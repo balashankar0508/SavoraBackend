@@ -1,8 +1,42 @@
+import { createHash } from 'crypto';
 import rateLimit from 'express-rate-limit';
 
 export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 20,
+  // per IP: integration tests come from one address; the per-email and per-token limiters stay on and are tested
+  skip: () => process.env.NODE_ENV === 'test',
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'too_many_requests' },
+});
+
+const sha = (v: string) => createHash('sha256').update(v).digest('hex').slice(0, 32);
+
+// Refresh/logout: keyed by the (hashed) refresh token, not the IP, because thousands of phones
+// share one mobile-carrier IP and a per-IP limit would sign real people out.
+export const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  keyGenerator: (req) => {
+    const token = req.body?.refreshToken;
+    return typeof token === 'string' && token ? `rt:${sha(token)}` : `ip:${req.ip}`;
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'too_many_requests' },
+});
+
+// Everything that sends or checks an emailed code, keyed by the email (one shared counter),
+// so guessing a code cannot be spread over many IP addresses and nobody can flood an inbox.
+// 10 per 15 minutes is plenty for a person and makes guessing a 6-digit code hopeless.
+export const emailCodeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  keyGenerator: (req) => {
+    const email = req.body?.email;
+    return typeof email === 'string' && email ? `em:${sha(email.trim().toLowerCase())}` : `ip:${req.ip}`;
+  },
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'too_many_requests' },

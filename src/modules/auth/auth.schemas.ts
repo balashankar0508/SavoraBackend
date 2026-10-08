@@ -8,7 +8,7 @@ export const registerSchema = z.object({
 
 export const verifyEmailSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
-  code: z.string().length(6),
+  code: z.string().regex(/^\d{6}$/),
 });
 
 export const resendVerificationSchema = z.object({
@@ -33,7 +33,8 @@ export const forgotPasswordSchema = z.object({
 });
 
 export const resetPasswordSchema = z.object({
-  token: z.string().min(1),
+  email: z.string().trim().toLowerCase().email(),
+  code: z.string().regex(/^\d{6}$/),
   newPassword: z.string().min(8).max(200),
 });
 

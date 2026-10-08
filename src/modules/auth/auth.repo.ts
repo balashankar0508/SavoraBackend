@@ -79,39 +79,55 @@ export async function createEmailVerification(
   );
 }
 
-export async function consumeEmailVerification(userId: string, codeHash: string): Promise<boolean> {
-  const { rows } = await pool.query(
-    `update email_verifications
-     set consumed_at = now()
-     where user_id = $1 and code_hash = $2 and consumed_at is null and expires_at > now()
-     returning id`,
-    [userId, codeHash],
-  );
-  return rows.length > 0;
-}
-
 // ── Password reset ──────────────────────────────────────────────
 
-export async function createPasswordReset(userId: string, tokenHash: string, expiresAt: Date): Promise<void> {
+export async function createPasswordReset(userId: string, codeHash: string, expiresAt: Date): Promise<void> {
+  // Only the newest reset code works: asking again cancels the earlier ones.
+  await pool.query(
+    'update password_resets set consumed_at = now() where user_id = $1 and consumed_at is null',
+    [userId],
+  );
   await pool.query(
     'insert into password_resets (user_id, token_hash, expires_at) values ($1, $2, $3)',
-    [userId, tokenHash, expiresAt],
+    [userId, codeHash, expiresAt],
   );
 }
 
-export async function findValidPasswordReset(
-  tokenHash: string,
-): Promise<{ id: string; user_id: string } | null> {
-  const { rows } = await pool.query(
-    `select id, user_id from password_resets
-     where token_hash = $1 and consumed_at is null and expires_at > now()`,
-    [tokenHash],
-  );
-  return rows[0] ?? null;
-}
+// ── One-time codes (signup verification and password reset) ─────
 
-export async function consumePasswordReset(id: string): Promise<void> {
-  await pool.query('update password_resets set consumed_at = now() where id = $1', [id]);
+/** A code stops working after this many wrong guesses; the person then asks for a new one. */
+export const MAX_CODE_ATTEMPTS = 5;
+
+const CODE_TABLES = {
+  verification: { table: 'email_verifications', hash: 'code_hash' },
+  reset: { table: 'password_resets', hash: 'token_hash' },
+} as const;
+
+/**
+ * Checks the person's newest live code in one statement (row-locked, so parallel guesses
+ * are counted one by one). A match consumes the code; a miss counts an attempt and, at the
+ * limit, kills the code. Returns true only for a match.
+ */
+export async function checkOneTimeCode(kind: keyof typeof CODE_TABLES, userId: string, codeHash: string): Promise<boolean> {
+  const { table, hash } = CODE_TABLES[kind];
+  const { rows } = await pool.query<{ ok: boolean }>(
+    `with current_code as (
+       select id, ${hash} = $2 as ok
+         from ${table}
+        where user_id = $1 and consumed_at is null and expires_at > now()
+        order by created_at desc
+        limit 1
+        for update
+     )
+     update ${table} t
+        set attempts = t.attempts + case when c.ok then 0 else 1 end,
+            consumed_at = case when c.ok or t.attempts + 1 >= $3 then now() else null end
+       from current_code c
+      where t.id = c.id
+     returning c.ok`,
+    [userId, codeHash, MAX_CODE_ATTEMPTS],
+  );
+  return rows[0]?.ok === true;
 }
 
 // ── Refresh tokens ───────────────────────────────────────────────

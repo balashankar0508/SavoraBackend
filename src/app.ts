@@ -42,7 +42,10 @@ export function createApp() {
 
   app.use(helmet());
   app.use(cors({ origin: env.CORS_ORIGIN }));
-  app.use(express.json({ limit: '10mb' })); // receipt images are base64-inlined in the JSON body
+  // Receipt images are base64 in the JSON body, so only the AI route accepts up to 10 MB; every other
+  // route is capped at 1 MB, so a client cannot make the server buffer huge bodies anywhere else.
+  app.use('/ai', express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '1mb' }));
   app.use(generalLimiter);
 
   app.get('/health', (_req, res) => res.json({ ok: true }));

@@ -15,6 +15,11 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
     return res.status(400).json({ error: 'invalid_body', details: err.flatten(), requestId });
   }
 
+  // body-parser: a body over the size limit, or JSON that does not parse (client errors, not 500s)
+  const bodyError = (err as { type?: string })?.type;
+  if (bodyError === 'entity.too.large') return res.status(413).json({ error: 'payload_too_large', requestId });
+  if (bodyError === 'entity.parse.failed') return res.status(400).json({ error: 'invalid_json', requestId });
+
   // multer: oversized upload / unexpected field
   if ((err as { name?: string })?.name === 'MulterError') {
     const code = (err as { code?: string }).code === 'LIMIT_FILE_SIZE' ? 'file_too_large' : 'invalid_upload';

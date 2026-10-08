@@ -3,6 +3,7 @@ import { pool } from '../../db/pool';
 import { env } from '../../config/env';
 import { HttpError } from '../../lib/httpError';
 import { LocalDiskDriver, StorageDriver } from './storage';
+import { sanitizeImage } from './sanitize';
 import { sniffImage } from './sniff';
 
 export const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -34,17 +35,19 @@ export async function saveFile(input: {
   if (input.buffer.length > MAX_FILE_BYTES) throw new HttpError(413, 'file_too_large');
   const kind = sniffImage(input.buffer);
   if (!kind) throw new HttpError(415, 'unsupported_file_type');
+  // only the re-encoded pixels are kept: no GPS location or other metadata reaches other members
+  const clean = await sanitizeImage(input.buffer, kind);
 
   const id = randomUUID();
   const key = `${eventPrefix(input.eventId)}/${id}.${kind.ext}`;
-  await storage.put(key, input.buffer);
+  await storage.put(key, clean);
   try {
     const { rows } = await pool.query<FileRecord>(
       `insert into files (id, owner_id, event_id, purpose, storage_key, mime, size_bytes, sha256)
        values ($1, $2, $3, $4, $5, $6, $7, $8)
        returning id, owner_id, event_id, purpose, storage_key, mime, size_bytes, created_at`,
-      [id, input.ownerId, input.eventId, input.purpose, key, kind.mime, input.buffer.length,
-        createHash('sha256').update(input.buffer).digest('hex')],
+      [id, input.ownerId, input.eventId, input.purpose, key, kind.mime, clean.length,
+        createHash('sha256').update(clean).digest('hex')],
     );
     return rows[0];
   } catch (err) {

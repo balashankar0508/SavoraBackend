@@ -48,6 +48,8 @@ export async function createTransaction(
   return rows[0];
 }
 
+const TRANSACTION_COLUMNS = new Set(['type', 'amount', 'category', 'notes', 'transaction_date', 'merchant_name', 'source']);
+
 export async function updateTransaction(
   userId: string,
   id: string,
@@ -61,7 +63,8 @@ export async function updateTransaction(
     source: string;
   }>,
 ): Promise<Transaction | null> {
-  const fields = Object.keys(updates);
+  // only known columns can ever reach the SQL text (defence in depth: the schema also strips unknown keys)
+  const fields = Object.keys(updates).filter(f => TRANSACTION_COLUMNS.has(f));
   if (fields.length === 0) {
     const { rows } = await pool.query<Transaction>(
       'select * from transactions where id = $1 and user_id = $2',

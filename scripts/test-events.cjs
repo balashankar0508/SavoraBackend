@@ -57,7 +57,7 @@ let n = 0;
 before(async () => {
   const admin = new Pool({ connectionString: `postgres://events_test@127.0.0.1:55439/postgres` });
   await admin.query(`drop database if exists ${DB} with (force)`);
-  await admin.query(`create database ${DB}`);
+  await admin.query(`create database ${DB} encoding 'UTF8' template template0`); // the migrations contain UTF-8 text
   await admin.end();
   const dir = path.join(__dirname, '..', 'migrations');
   for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.sql')).sort()) {
@@ -149,11 +149,12 @@ const balancesOf = async (user, eventId) => {
 const markPaid = (user, eventId, to, amount, over = {}) =>
   api(user, 'POST', `/events/${eventId}/settlements`, { id: randomUUID(), to_user: to.id, amount_paise: amount, method: 'upi', ...over });
 
-const png = () => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), randomBytes(64)]);
+// a real (tiny, random-coloured) PNG: the server decodes and re-encodes every upload, so fake bytes are refused
+const png = () => require('sharp')({ create: { width: 4, height: 4, channels: 3, background: `#${randomBytes(3).toString('hex')}` } }).png().toBuffer();
 async function upload(user, eventId, purpose) {
   const f = new FormData();
   f.append('purpose', purpose);
-  f.append('file', new Blob([png()], { type: 'image/png' }), 'x.png');
+  f.append('file', new Blob([await png()], { type: 'image/png' }), 'x.png');
   const r = await api(user, 'POST', `/events/${eventId}/files`, undefined, f);
   assert.equal(r.status, 201, JSON.stringify(r.body));
   return r.body.file;

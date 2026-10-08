@@ -45,8 +45,8 @@ export async function forgotPasswordHandler(req: Request, res: Response) {
 }
 
 export async function resetPasswordHandler(req: Request, res: Response) {
-  const { token, newPassword } = schemas.resetPasswordSchema.parse(req.body);
-  const result = await service.resetPassword(token, newPassword);
+  const { email, code, newPassword } = schemas.resetPasswordSchema.parse(req.body);
+  const result = await service.resetPassword(email, code, newPassword);
   res.json(result);
 }
 
