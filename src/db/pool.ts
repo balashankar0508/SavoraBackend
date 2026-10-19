@@ -15,6 +15,11 @@ types.setTypeParser(types.builtins.NUMERIC, (val) => parseFloat(val));
 // parse to numbers for the same reason as NUMERIC above.
 types.setTypeParser(types.builtins.INT8, (val) => parseInt(val, 10));
 
+// DATE columns (transaction_date, target_date, expense_date ...) are calendar days. By default pg turns
+// them into a JS Date at midnight, which JSON-encodes as "2026-10-19T00:00:00.000Z": the app then shows
+// that text and sends it back, and the "YYYY-MM-DD" validation rejects it. Keep the plain day string.
+types.setTypeParser(types.builtins.DATE, (val) => val);
+
 export const pool = new Pool({
   connectionString: env.DATABASE_URL,
 });
